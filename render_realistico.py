@@ -105,6 +105,8 @@ def new_cerc(rng, z):
     c.fwd = rng.random() < 0.5          # fase passiva: nuoto a testa avanti (True) o solo affondamento
     c.head_first = False
     c.arc = 0.0
+    c.thrasher = False
+    c.elong, c.girth, c.taper, c.bbend = 1.0, 1.0, 0.0, 0.0
     c.static = make_static(rng)
     return c
 
@@ -165,7 +167,76 @@ def start_rest(c, rng):
         c.arc = rng.choice([-1, 1]) * rng.uniform(0.55, 0.9)
 
 
+def start_tmode(c, rng):
+    """Ciclo osservato nel video di riferimento: allungamento della testa -> contrazione ->
+    colpi laterali rapidissimi quasi sul posto -> (pausa) -> di nuovo."""
+    order = {'calm': 'extend', 'extend': 'contract', 'contract': 'flick'}
+    if c.tmode == 'flick':
+        c.tmode = 'calm' if rng.random() < 0.35 else 'extend'
+    else:
+        c.tmode = order[c.tmode]
+    c.ttimer = {'calm': rng.uniform(0.6, 1.4), 'extend': rng.uniform(0.45, 0.8),
+                'contract': rng.uniform(0.2, 0.35), 'flick': rng.uniform(0.7, 1.5)}[c.tmode]
+    c.bend_sign = rng.choice([-1, 1])
+    c.jerk = 0.0
+
+
+def step_thrash(c, dt, t, rng):
+    c.ttimer -= dt
+    if c.ttimer <= 0:
+        start_tmode(c, rng)
+    m = c.tmode
+    if m == 'extend':
+        tg = (1.75, 0.60, 0.85, 0.35 * c.bend_sign, 0.25, 6.0, 0.3)
+        k = 6.0
+    elif m == 'contract':
+        tg = (0.72, 1.32, 0.0, 0.0, 0.3, 6.0, 0.3)
+        k = 11.0
+    elif m == 'flick':
+        osc = math.sin(2 * math.pi * 6.0 * t + c.psi)
+        tg = (1.15 + 0.25 * math.sin(2 * math.pi * 3.1 * t), 0.88, 0.35, 0.65 * osc, 1.0, c.freq, 1.0)
+        k = 16.0
+    else:
+        tg = (1.0, 1.0, 0.0, 0.0, 0.08, 0.5, 0.3)
+        k = 4.0
+    el, gi, ta, bb, am, f, spr = tg
+    g = 1 - math.exp(-dt * k)
+    c.elong += (el - c.elong) * g
+    c.girth += (gi - c.girth) * g
+    c.taper += (ta - c.taper) * g
+    c.bbend += (bb - c.bbend) * g
+    c.amp += (am - c.amp) * (1 - math.exp(-dt * 12))
+    c.spread += (spr - c.spread) * (1 - math.exp(-dt * 6))
+    c.dphase = 2 * math.pi * f
+    c.phase += c.dphase * dt
+    c.pulse = 0.0
+    if m == 'flick':
+        c.jerk -= dt
+        if c.jerk <= 0:          # scatti bruschi di direzione
+            c.jerk = rng.uniform(0.07, 0.18)
+            ang = rng.choice([-1, 1]) * rng.uniform(0.5, 1.3)
+            ca, sa = math.cos(ang), math.sin(ang)
+            e = c.e
+            c.rest_dir = unit(np.array([e[0] * ca - e[1] * sa, e[0] * sa + e[1] * ca, e[2] * 0.5 + rng.normal(0, 0.15)]))
+            c.roll_rate = rng.choice([-1, 1]) * 2 * math.pi * rng.uniform(1.0, 2.5)
+        rate = 14.0
+    else:
+        c.roll_rate *= math.exp(-dt * 3)
+        rate = 3.0
+    c.roll += c.roll_rate * dt
+    c.e = unit(c.e + (c.rest_dir - c.e) * (1 - math.exp(-dt * rate)))
+    c.anchor = c.anchor + np.array([4.0 * math.sin(t * 0.2), 6.0, 0.0]) * dt
+    v = (c.anchor - c.pos) * 2.5
+    if m == 'flick':
+        v = v + rng.normal(0, 140, 3) * np.array([1, 1, 0.2])
+    c.v = v
+    c.pos = c.pos + v * dt
+
+
 def step_cerc(c, dt, t, rng):
+    if c.thrasher:
+        step_thrash(c, dt, t, rng)
+        return
     c.timer -= dt
     if c.swim:
         if c.timer <= 0 or c.pos[1] < -40:
@@ -232,7 +303,8 @@ def step_cerc(c, dt, t, rng):
 def snapshot(c):
     return dict(pos=c.pos.copy(), v=c.v.copy(), e=c.e.copy(), roll=c.roll, roll_rate=c.roll_rate,
                 phase=c.phase, dphase=c.dphase, amp=c.amp, spread=c.spread, pulse=c.pulse,
-                bend=c.bend, size=c.size, static=c.static)
+                bend=c.bend, size=c.size, static=c.static,
+                elong=c.elong, girth=c.girth, taper=c.taper, bbend=c.bbend)
 
 
 def simulate(n_frames, seed, warm=6.0):
@@ -257,6 +329,19 @@ def simulate(n_frames, seed, warm=6.0):
         c.speed = 0.0
         c.timer = rng.uniform(1.0, 3.5)
         c.sink_to = y + rng.uniform(80, 200)
+    # due individui che si agitano quasi sul posto: uno a fuoco, uno un po' fuori fuoco
+    for c, (x, y, z), t0 in ((cs[1], (0.76 * FW, 0.62 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.70 * FH, 190.0), 2.5)):
+        c.thrasher = True
+        c.pos = np.array([x, y, z])
+        c.anchor = c.pos.copy()
+        c.e = unit(np.array([0.5, -1.0, 0.1]))
+        c.rest_dir = c.e.copy()
+        c.v = np.zeros(3)
+        c.tmode = 'calm'
+        c.ttimer = t0
+        c.jerk = 0.0
+        c.bend_sign = 1
+        c.amp = 0.08
     frames = []
     for f in range(n_frames):
         frames.append([snapshot(c) for c in cs])
@@ -507,21 +592,34 @@ def body_geom(s):
     n1b = unit(n1 - np.dot(n1, eb) * eb)
     n2b = np.cross(eb, n1b)
     p = math.sin(s['pulse'])
-    a = BODY_A * sz * (1 + 0.08 * p)
-    r1 = BODY_R1 * sz * (1 - 0.05 * p)
-    r2 = BODY_R2 * sz * (1 - 0.05 * p)
+    a = BODY_A * sz * (1 + 0.08 * p) * s['elong']
+    r1 = BODY_R1 * sz * (1 - 0.05 * p) * s['girth']
+    r2 = BODY_R2 * sz * (1 - 0.05 * p) * s['girth']
     J = s['pos']
     C = J - eb * (a - 6)                   # centro del corpo (l'asse va dal corpo verso la coda)
     R = np.column_stack([eb, n1b, n2b])
     return C, R, a, r1, r2
 
 
+BEND = [0.0]   # curvatura del corpo dell'individuo in corso di rendering
+
+
+def bend_off(u, a):
+    # curvatura a falce: nulla alla giunzione con la coda (u=+1), massima all'apice (u=-1)
+    return 0.25 * BEND[0] * a * (1 - u) ** 2
+
+
+def body_point(C, R, a, vec):
+    return C + R @ vec + R[:, 1] * bend_off(vec[0] / a, a)
+
+
 def local_to_world(C, R, a, r1, r2, uvw):
-    return C[None, :] + (uvw * np.array([a, r1, r2])) @ R.T
+    return C[None, :] + (uvw * np.array([a, r1, r2])) @ R.T + np.outer(bend_off(uvw[:, 0], a), R[:, 1])
 
 
 def render_cerc(pert, s, t):
     C, R, a, r1, r2 = body_geom(s)
+    BEND[0] = s['bbend']
     taus = np.linspace(0, EXPOSURE, TAIL_SAMPLES) if s['amp'] > 0.25 else np.array([EXPOSURE / 2])
     tails = [tail_geom(s, tau) for tau in taus]
 
@@ -530,7 +628,8 @@ def render_cerc(pert, s, t):
     z_tail = float(np.mean(tails[0][0][:, 2]))
     sig = max(sigma_for(z_body), sigma_for(z_tail))
     margin = int(3 * sig + 8)
-    allp = [C[:2] + d for d in (np.array([a + r1, a + r1]), -np.array([a + r1, a + r1]))]
+    ext = a * (1 + abs(s["bbend"])) + r1
+    allp = [C[:2] + d for d in (np.array([ext, ext]), -np.array([ext, ext]))]
     for P, rad, fur, _, _ in tails:
         allp.append(P[:, :2].min(0) - 20)
         allp.append(P[:, :2].max(0) + 20)
@@ -557,19 +656,20 @@ def render_cerc(pert, s, t):
     Ab = np.zeros((h, w), np.float32)
     uu = np.linspace(-1, 1, 33)
     prof = np.sqrt(np.clip(1 - uu ** 2, 0, 1)) ** 0.85 * (1 + 0.10 * uu) * (1 - 0.30 * np.clip(uu - 0.55, 0, 1) / 0.45)
-    prof = np.maximum(prof, 0.10)
+    prof = prof * (1 - 0.85 * s['taper'] * np.clip(-uu, 0, 1) ** 1.3)   # testa allungata e appuntita
+    prof = np.maximum(prof, 0.06)
     rmean = 0.5 * (r1 + r2)
-    cen = C[None, :] + np.outer(uu * a * 0.97, R[:, 0])
+    cen = C[None, :] + np.outer(uu * a * 0.97, R[:, 0]) + np.outer(bend_off(uu, a), R[:, 1])
     add_tube(Tprof, cen[:, :2] * PX - np.array([ox, oy]), prof * rmean * PX)
     # organo anteriore (testa): zona più densa
-    c = C + R @ np.array([-0.70 * a, 0, 0])
+    c = body_point(C, R, a, np.array([-0.70 * a, 0, 0]))
     tmp = np.zeros_like(Tb)
     add_ellipsoid(tmp, ox, oy, c, R, (0.28 * a, 0.62 * r1, 0.62 * r2))
     tmp = cv2.GaussianBlur(tmp, (0, 0), 2.0)
     Tb += 0.10 * tmp
     Ab += 0.0022 * tmp
     # acetabolo (ventosa ventrale): anello
-    c = C + R @ np.array([0.30 * a, 0.0, 0.62 * r2])
+    c = body_point(C, R, a, np.array([0.30 * a, 0.0, 0.62 * r2]))
     tmp[:] = 0
     add_ellipsoid(tmp, ox, oy, c, R, (12, 12, 8), mode='add')
     tmp2 = np.zeros_like(Tb)
@@ -581,7 +681,7 @@ def render_cerc(pert, s, t):
     st = s['static']
     gx, gy, gw = [], [], []
     for g in st['glands']:
-        cg = C + R @ np.array([g['u'] * a, g['v'] * r1, g['w'] * r2])
+        cg = body_point(C, R, a, np.array([g['u'] * a, g['v'] * r1, g['w'] * r2]))
         tmp[:] = 0
         add_ellipsoid(tmp, ox, oy, cg, R, (g['r'] * 1.2, g['r'], g['r'] * 0.9), mode='add')
         tmp = cv2.GaussianBlur(tmp, (0, 0), 1.2)
