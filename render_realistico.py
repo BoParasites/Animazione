@@ -211,71 +211,55 @@ def rand_axis(e, rng):
 
 
 def step_thrash(c, dt, t, rng):
-    """Agitazione quasi sul posto (brief §5.3-5.4): raffiche irregolari di 0,5-3 s e pause di 0,2-1 s.
-    Capriole in 3D (l'asse può puntare verso l'obiettivo: l'animale si vede accorciato e capovolto),
-    con il corpo che si comprime a ogni capriola."""
+    """Agitazione quasi sul posto: rotazione continua in 3D con velocità angolare che varia in modo
+    fluido (girate rapide di 180° in 0,15-0,3 s), corpo e coda che si arrotolano insieme a C
+    (accartocciamento) e si ridistendono, oscillazione del corpo attorno all'asse. Pause brevi."""
     c.ttimer -= dt
     if c.ttimer <= 0:
         c.burst = not c.burst
-        c.ttimer = rng.uniform(0.5, 3.0) if c.burst else rng.uniform(0.2, 1.0)
-        c.shape_T = rng.uniform(0.3, 1.0)
-        c.bend_target = rng.normal(0, 0.12) if not c.burst else 0.0
-        c.flip_t = rng.uniform(0.2, 0.8)
-        c.tumble_axis = rand_axis(c.e, rng)
-        c.tumble_w = rng.uniform(0.8, 2.0) * rng.choice([-1, 1])
-        c.rock_f = rng.uniform(2.5, 4.0)
+        c.ttimer = rng.uniform(0.8, 3.0) if c.burst else rng.uniform(0.2, 0.6)
+        c.wf = rng.uniform(0.5, 1.6, 3)            # Hz delle componenti della velocità angolare
+        c.wp = rng.uniform(0, 6.28, 3)
+        c.cf = rng.uniform(1.2, 2.6)               # Hz dei cicli di accartocciamento
     jitter_beat(c, dt, rng)
-    if c.burst:
-        c.amp += (1.0 - c.amp) * (1 - math.exp(-dt * 30))
-        c.flip_t -= dt
-        c.jerk -= dt
-        if c.rot_left <= 0 and c.flip_t <= 0:            # capriola in 3D, 3-5 fotogrammi
-            c.flip_t = rng.uniform(1.0, 2.5)
-            c.rot_axis = rand_axis(c.e, rng)
-            c.rot_left = math.pi * rng.uniform(0.8, 1.05)
-            c.rot_w = c.rot_left / rng.uniform(0.25, 0.4)
-            c.squash = 1.0                                 # il corpo si comprime
-            c.bend_target = rng.choice([-1, 1]) * rng.uniform(0.15, 0.3)   # la coda si inarca nella capriola
-            c.roll_rate = rng.choice([-1, 1]) * 2 * math.pi * rng.uniform(1.0, 3.0)
-            c.jv = -c.e * rng.uniform(250, 450)
-        # rotazione esplicita (niente scorciatoie: l'asse passa davvero per la profondità)
-        if c.rot_left > 0:
-            d = min(c.rot_left, c.rot_w * dt)
-            c.e = unit(rotate(c.e, c.rot_axis, d))
-            c.rot_left -= d
-        else:
-            c.bend_target *= math.exp(-dt * 4)
-        c.e = unit(rotate(c.e, c.tumble_axis, 0.5 * c.tumble_w * dt))   # capitombolo lento continuo
-        c.rock_ph += dt * 2 * math.pi * c.rock_f
-        rock_a = 0.45
-        el = 1.12 + 0.08 * math.sin(2 * math.pi * t / c.shape_T) - 0.45 * c.squash
-    else:
-        c.amp += (0.04 - c.amp) * (1 - math.exp(-dt * 30))
-        c.rot_left = 0.0
-        c.rock_ph += dt * 2 * math.pi * 0.8
-        rock_a = 0.10
-        el = 1.0 + 0.32 * math.sin(2 * math.pi * t / c.shape_T)     # fuso allungato <-> ovoide tozzo
-    c.squash *= math.exp(-dt * 4.5)
-    c.rock += (rock_a * math.sin(c.rock_ph) - c.rock) * (1 - math.exp(-dt * 20))
-    g = 1 - math.exp(-dt * 14)
-    c.elong += (el - c.elong) * g
-    c.girth += (1.0 / math.sqrt(max(c.elong, 0.5)) ** 1.3 - c.girth) * g
-    c.taper += (0.6 * max(0.0, c.elong - 1.0) - c.taper) * g
-    c.bbend += (0.0 - c.bbend) * g
-    c.bend += (c.bend_target - c.bend) * (1 - math.exp(-dt * 12))
-    c.spread += ((1.3 if c.burst else 0.7) - c.spread) * (1 - math.exp(-dt * 8))
+    on = 1.0 if c.burst else 0.0
+    c.act += (on - c.act) * (1 - math.exp(-dt * (12 if c.burst else 6)))   # attacco rapido, rilascio morbido
+    act = c.act
+    c.amp += ((1.0 if c.burst else 0.15) - c.amp) * (1 - math.exp(-dt * 25))
+
+    # velocità angolare 3D liscia e intensa (rad/s)
+    w = np.array([math.sin(2 * math.pi * c.wf[k] * t + c.wp[k]) for k in range(3)])
+    w = w * np.array([1.0, 1.0, 0.8])
+    w = w - np.dot(w, c.e) * c.e                  # solo rotazioni che cambiano la direzione dell'asse
+    wn = np.linalg.norm(w)
+    if wn > 1e-6:
+        c.e = unit(rotate(c.e, w / wn, 20.0 * act * wn * dt))
+    c.roll += 2 * math.pi * 2.0 * act * math.sin(2 * math.pi * 0.9 * t) * dt
+
+    # accartocciamento: corpo e coda si piegano dallo stesso lato (C), il corpo si accorcia
+    c.cph += dt * 2 * math.pi * c.cf * (0.3 + act)
+    cr = act * abs(math.sin(c.cph)) ** 1.5
+    side = 1.0 if math.sin(c.cph) >= 0 else -1.0
+    c.bbend += (side * 0.75 * cr - c.bbend) * (1 - math.exp(-dt * 30))
+    c.bend += (side * 0.45 * cr - c.bend) * (1 - math.exp(-dt * 30))
+    el = 1.12 - 0.50 * cr + 0.12 * (1 - act) * math.sin(2 * math.pi * 1.3 * t)
+    c.elong += (el - c.elong) * (1 - math.exp(-dt * 25))
+    c.girth = 1.0 / math.sqrt(max(c.elong, 0.5)) ** 1.3
+    c.taper = 0.5 * max(0.0, c.elong - 1.0)
+    c.spread += ((1.2 - 0.7 * cr) - c.spread) * (1 - math.exp(-dt * 15))
+
+    # oscillazione del corpo alla cerniera, fluida
+    c.rock_ph += dt * 2 * math.pi * (4.5 * act + 1.0)
+    c.rock = 0.40 * act * math.sin(c.rock_ph)
+
     c.dphase = 2 * math.pi * c.freq
     c.phase += c.dphase * dt
     c.pulse = 0.0
-    c.roll_rate *= math.exp(-dt * 3)
-    c.roll += c.roll_rate * dt
-    # deriva in profondità durante le raffiche: entra ed esce dal piano focale
-    c.zph += dt * (1.6 if c.burst else 0.3)
+    # resta nella sua zona; spinte brevi dalla coda nella direzione in cui punta
+    c.zph += dt * (1.2 * act + 0.3)
     c.anchor = c.anchor + np.array([4.0 * math.sin(t * 0.2), 5.0, 0.0]) * dt
     target = c.anchor + np.array([0.0, 0.0, 170.0 * math.sin(c.zph)])
-    v = (target - c.pos) * 2.5
-    c.jv = c.jv * math.exp(-dt * 9)
-    v = v + c.jv
+    v = (target - c.pos) * 3.0 + c.e * 220.0 * act * (1 - cr)
     c.v = v
     c.pos = c.pos + v * dt
 
@@ -409,6 +393,11 @@ def simulate(n_frames, seed, warm=6.0):
         c.tumble_w = 0.0
         c.rock_ph = 0.0
         c.rock_f = 3.0
+        c.act = 0.0
+        c.cph = rng.uniform(0, 6.28)
+        c.wf = rng.uniform(1.2, 3.5, 3)
+        c.wp = rng.uniform(0, 6.28, 3)
+        c.cf = 1.8
         c.rec_amp = 0.60                # ±34°: il corpo subisce passivamente (brief §5.3)
         c.amp = 0.04
     frames = []
