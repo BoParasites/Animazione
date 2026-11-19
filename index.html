@@ -111,6 +111,7 @@
       bodyPh: rnd() * TAU,
       wob: rnd() * TAU,
       drift: randn() * 12,
+      sinkTo: rr(0.3, 0.9) * H,
       twitch: 0,
       glands: makeGlands()
     };
@@ -130,13 +131,16 @@
   function updateCerc(c, dt, t) {
     c.timer -= dt;
     const yTop = H * 0.12, yBot = H * 0.94;
-    if (c.timer <= 0 || (c.state === 'swim' && c.y < yTop) || (c.state === 'rest' && c.y > yBot)) {
+    const restDone = c.state === 'rest' && c.timer <= 0 && c.y >= c.sinkTo;
+    if ((c.state === 'swim' && c.timer <= 0) || restDone || (c.state === 'swim' && c.y < yTop) || (c.state === 'rest' && c.y > yBot)) {
       if (c.state === 'swim' || c.y < yTop) {
         c.state = 'rest'; c.timer = rr(2.2, 6.5);
+        // affonda passivamente fino a una profondità casuale prima di riprendere a nuotare
+        c.sinkTo = rr(0.3, 0.9) * H;
         c.thT = -Math.PI / 2 + clamp(randn() * 0.35, -0.7, 0.7);
         c.drift = randn() * 14;
       } else {
-        c.state = 'swim'; c.timer = rr(0.9, 2.8);
+        c.state = 'swim'; c.timer = rr(0.8, 2.2);
         // risalita a coda avanti, prevalentemente verso l'alto
         c.thT = -Math.PI / 2 + clamp(randn() * 0.7, -1.3, 1.3);
         c.freq = rr(8, 10.5);
@@ -163,7 +167,7 @@
     c.speed = lerp(c.speed, sp, 1 - Math.exp(-dt * (swimming ? 4 : 2.5)));
     // velocità in µm/s: nuoto lungo +x locale (coda in avanti), affondamento passivo a corpo in giù
     let vx = Math.cos(c.th) * c.speed, vy = Math.sin(c.th) * c.speed;
-    vy += swimming ? 0 : 85 * (1 - c.amp);
+    vy += swimming ? 0 : 120 * (1 - c.amp);
     vx += c.drift + 10 * Math.sin(t * 0.13 + c.z * 4);   // lieve corrente
     const k = PXUM * c.z;
     c.x += vx * k * dt; c.y += vy * k * dt;
@@ -488,6 +492,7 @@
 
   if (CAPTURE) {
     window.__frame = (dt) => { step(dt); render(); return true; };
+    window.__sim = (n, dt) => { for (let i = 0; i < n; i++) step(dt); return cercs.map(c => +(c.y / H).toFixed(2)); };
     render();
   } else {
     let last = performance.now();
