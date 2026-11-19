@@ -64,6 +64,7 @@ ABS_MINERAL = np.array([1.0, 1.05, 1.15], np.float32)
 ABS_ORGANIC = np.array([0.85, 0.95, 1.25], np.float32)
 
 N_CERC = 12
+THRASH = False   # cercarie che si agitano sul posto: disattivate, il movimento non era convincente
 
 
 def unit(v):
@@ -330,7 +331,8 @@ def simulate(n_frames, seed, warm=6.0):
         c.timer = rng.uniform(1.0, 3.5)
         c.sink_to = y + rng.uniform(80, 200)
     # due individui che si agitano quasi sul posto: uno a fuoco, uno un po' fuori fuoco
-    for c, (x, y, z), t0 in ((cs[1], (0.76 * FW, 0.62 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.70 * FH, 190.0), 2.5)):
+    thrashers = ((cs[1], (0.76 * FW, 0.62 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.70 * FH, 190.0), 2.5)) if THRASH else ()
+    for c, (x, y, z), t0 in thrashers:
         c.thrasher = True
         c.pos = np.array([x, y, z])
         c.anchor = c.pos.copy()
