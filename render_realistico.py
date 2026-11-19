@@ -162,7 +162,7 @@ def start_rest(c, rng):
         # nuoto corpo-avanti verso il basso, con traiettoria ad arco (Panzner et al. 2025, fig. 3)
         c.timer = rng.uniform(2.6, 3.8)
         c.rest_dir = unit(np.array([rng.normal(0, 0.45), -1.0, rng.normal(0, 0.25)]))
-        c.arc = rng.choice([-1, 1]) * rng.uniform(0.25, 0.6)
+        c.arc = rng.choice([-1, 1]) * rng.uniform(0.55, 0.9)
 
 
 def step_cerc(c, dt, t, rng):
@@ -179,7 +179,7 @@ def step_cerc(c, dt, t, rng):
 
     sw = c.swim
     hf = (not sw) and c.head_first
-    amp_t = 1.0 if sw else (0.6 if hf else (0.55 if c.twitch > 0 else 0.06))
+    amp_t = 1.0 if sw else (0.9 if hf else (0.55 if c.twitch > 0 else 0.06))
     c.amp += (amp_t - c.amp) * (1 - math.exp(-dt * (14 if sw or hf or c.twitch > 0 else 4)))
     # furche divaricate nella fase attiva coda-avanti, tenute unite nella fase passiva
     c.spread += ((1.05 if sw else 0.12) - c.spread) * (1 - math.exp(-dt * 4))
@@ -210,7 +210,7 @@ def step_cerc(c, dt, t, rng):
         rate = 2.0 if hf else 1.3
     c.e = unit(c.e + (target - c.e) * (1 - math.exp(-dt * rate)))
 
-    sp_t = c.vmax * (0.4 + 0.6 * c.amp) if sw else (-0.45 * c.vmax if hf else 0.0)   # negativa: verso la testa
+    sp_t = c.vmax * (0.4 + 0.6 * c.amp) if sw else (-0.8 * c.vmax if hf else 0.0)   # negativa: verso la testa
     c.speed += (sp_t - c.speed) * (1 - math.exp(-dt * (5 if sw or hf else 3)))
     v = c.e * c.speed
     if not sw and not hf:
