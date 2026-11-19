@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cercarie in controluce</title>
+<style>
+  :root { --bg: #1b2414; --ink: rgba(255,250,225,0.75); }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 16px; bottom: 14px; color: var(--ink);
+    font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    letter-spacing: .02em; pointer-events: none; user-select: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,.5);
+  }
+  #bar { height: 2px; background: var(--ink); margin-bottom: 4px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="bar"></div><span id="barlabel">100 µm</span></div>
+<script>
+(() => {
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const CAPTURE = params.has('capture');          // rendering frame-per-frame (video export)
+  const N_CERC = parseInt(params.get('n') || '13', 10);
+
+  // ---------- RNG deterministico ----------
+  let seed = parseInt(params.get('seed') || '7', 10) >>> 0;
+  const rnd = () => { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const rr = (a, b) => a + (b - a) * rnd();
+  const randn = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const angDiff = (a, b) => { let d = b - a; while (d > Math.PI) d -= 2*Math.PI; while (d < -Math.PI) d += 2*Math.PI; return d; };
+  const TAU = Math.PI * 2;
+
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const hasFilter = 'filter' in ctx;
+  let W = 0, H = 0, DPR = 1, PXUM = 0.4; // px per µm (a profondità 1)
+
+  // ---------- Morfologia (µm, valori indicativi S. mansoni) ----------
+  const BODY_L = 190, BODY_W = 72;      // corpo
+  const TAIL_L = 230, TAIL_W0 = 38, TAIL_W1 = 22; // tronco caudale
+  const FURCA_L = 100, FURCA_W = 17;     // furche
+
+  // ---------- Grana ----------
+  const grain = document.createElement('canvas'); grain.width = grain.height = 192;
+  { const g = grain.getContext('2d'); const id = g.createImageData(192, 192);
+    for (let i = 0; i < id.data.length; i += 4) { const v = 128 + randn() * 40;
+      id.data[i] = id.data[i+1] = id.data[i+2] = v; id.data[i+3] = 255; }
+    g.putImageData(id, 0, 0); }
+  let grainPat = null;
+
+  // ---------- Scena ----------
+  const particles = [];
+  const bokeh = [];
+  const cercs = [];
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    PXUM = Math.min(W, H) / 1080 * 0.58;
+    grainPat = ctx.createPattern(grain, 'repeat');
+    const bar = document.getElementById('bar');
+    bar.style.width = (100 * PXUM * 0.85) + 'px'; // scala al piano di fuoco
+  }
+
+  function initScene() {
+    particles.length = bokeh.length = cercs.length = 0;
+    const area = W * H;
+    const np = Math.round(area / 9000);
+    for (let i = 0; i < np; i++) particles.push({
+      x: rnd() * W, y: rnd() * H, z: rr(0.3, 1.2), r: rr(0.4, 1.8),
+      a: rr(0.15, 0.55), vx: 0, vy: rr(-2, 6), ph: rnd() * TAU,
+      kind: rnd() < 0.12 ? 1 : 0, rot: rnd() * TAU, len: rr(3, 9)
+    });
+    for (let i = 0; i < 14; i++) bokeh.push({
+      x: rnd() * W, y: rnd() * H, r: rr(10, 46), a: rr(0.03, 0.10),
+      vx: rr(-3, 3), vy: rr(-4, 4), ph: rnd() * TAU, warm: rnd() < 0.6
+    });
+    for (let i = 0; i < N_CERC; i++) cercs.push(makeCerc(i));
+    // un paio molto vicine all'obiettivo, fuori fuoco
+    cercs[0].z = 1.45; cercs[1].z = 1.3;
+    cercs.sort((a, b) => a.z - b.z);
+  }
+
+  function makeCerc(i) {
+    const swim = rnd() < 0.55;
+    return {
+      x: rr(0.05, 0.95) * W, y: rr(0.12, 0.95) * H,
+      z: rr(0.45, 1.05),
+      th: -Math.PI / 2 + randn() * 0.5,     // orientazione: asse locale +x = verso la coda
+      thT: -Math.PI / 2,
+      state: swim ? 'swim' : 'rest',
+      timer: rr(0.3, swim ? 2.5 : 5),
+      speed: swim ? 500 : 0,                // µm/s
+      vx: 0, vy: 0,
+      phase: rnd() * TAU,                   // fase del battito caudale
+      freq: rr(8, 10.5),                    // Hz (visivo, rallentato)
+      amp: swim ? 1 : 0.15,
+      spread: swim ? 0.75 : 1.05,
+      bodyPh: rnd() * TAU,
+      wob: rnd() * TAU,
+      drift: randn() * 12,
+      twitch: 0,
+      glands: makeGlands()
+    };
+  }
+
+  function makeGlands() {
+    // ghiandole di penetrazione: due gruppi laterali di cellule granulose
+    const g = [];
+    for (const side of [-1, 1]) for (let k = 0; k < 5; k++) {
+      g.push({ x: -55 - k * 17 + randn() * 3, y: side * (11 + rnd() * 9), r: rr(7, 10),
+        dots: Array.from({length: 6}, () => [randn() * 3, randn() * 3, rr(0.8, 1.8)]) });
+    }
+    return g;
+  }
+
+  // ---------- Dinamica ----------
+  function updateCerc(c, dt, t) {
+    c.timer -= dt;
+    const yTop = H * 0.12, yBot = H * 0.94;
+    if (c.timer <= 0 || (c.state === 'swim' && c.y < yTop) || (c.state === 'rest' && c.y > yBot)) {
+      if (c.state === 'swim' || c.y < yTop) {
+        c.state = 'rest'; c.timer = rr(2.2, 6.5);
+        c.thT = -Math.PI / 2 + clamp(randn() * 0.35, -0.7, 0.7);
+        c.drift = randn() * 14;
+      } else {
+        c.state = 'swim'; c.timer = rr(0.9, 2.8);
+        // risalita a coda avanti, prevalentemente verso l'alto
+        c.thT = -Math.PI / 2 + clamp(randn() * 0.7, -1.3, 1.3);
+        c.freq = rr(8, 10.5);
+      }
+    }
+    // piccoli scatti durante la fase passiva
+    if (c.state === 'rest' && c.twitch <= 0 && rnd() < dt * 0.12) c.twitch = rr(0.15, 0.35);
+    c.twitch = Math.max(0, c.twitch - dt);
+
+    const swimming = c.state === 'swim';
+    const ampT = swimming ? 1 : (c.twitch > 0 ? 0.6 : 0.10);
+    c.amp = lerp(c.amp, ampT, 1 - Math.exp(-dt * (swimming ? 10 : 4)));
+    c.spread = lerp(c.spread, swimming ? 0.75 : 1.05, 1 - Math.exp(-dt * 3));
+    const f = swimming ? c.freq : (c.twitch > 0 ? 7 : 1.1);
+    c.phase += TAU * f * dt;
+    c.bodyPh += dt * (swimming ? 2.2 : 0.9);
+
+    // orientazione con lieve oscillazione (traiettoria elicoidale proiettata)
+    c.wob += dt * (swimming ? 3.1 : 0.6);
+    const target = c.thT + (swimming ? 0.12 * Math.sin(c.wob) : 0.05 * Math.sin(c.wob));
+    c.th += angDiff(c.th, target) * (1 - Math.exp(-dt * (swimming ? 3 : 1.4)));
+
+    const sp = swimming ? 520 * (0.55 + 0.45 * c.amp) : 0;
+    c.speed = lerp(c.speed, sp, 1 - Math.exp(-dt * (swimming ? 4 : 2.5)));
+    // velocità in µm/s: nuoto lungo +x locale (coda in avanti), affondamento passivo a corpo in giù
+    let vx = Math.cos(c.th) * c.speed, vy = Math.sin(c.th) * c.speed;
+    vy += swimming ? 0 : 85 * (1 - c.amp);
+    vx += c.drift + 10 * Math.sin(t * 0.13 + c.z * 4);   // lieve corrente
+    const k = PXUM * c.z;
+    c.x += vx * k * dt; c.y += vy * k * dt;
+
+    const m = 260 * k;
+    if (c.x < -m) c.x = W + m; else if (c.x > W + m) c.x = -m;
+    c.y = clamp(c.y, -m, H + m);
+  }
+
+  // ---------- Disegno ----------
+  function tailGeometry(c, phase, amp) {
+    const N = 26, pts = [];
+    const A = 46 * amp;              // ampiezza laterale massima (µm)
+    const kWave = 1.25;              // lunghezze d'onda lungo il tronco
+    const shrink = 1 - 0.10 * amp;
+    for (let i = 0; i < N; i++) {
+      const s = i / (N - 1);
+      const env = 0.06 + 0.94 * Math.pow(s, 1.5);
+      // onda che viaggia dalla punta verso la base (spinta in avanti, coda che precede)
+      const y = A * env * Math.sin(TAU * kWave * s + phase);
+      pts.push([s * TAIL_L * shrink, y]);
+    }
+    const left = [], right = [];
+    for (let i = 0; i < N; i++) {
+      const p = pts[i], q = pts[Math.min(N - 1, i + 1)], o = pts[Math.max(0, i - 1)];
+      let tx = q[0] - o[0], ty = q[1] - o[1]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+      const w = lerp(TAIL_W0, TAIL_W1, i / (N - 1)) / 2;
+      left.push([p[0] - ty * w, p[1] + tx * w]);
+      right.push([p[0] + ty * w, p[1] - tx * w]);
+    }
+    const tip = pts[N - 1], pre = pts[N - 3];
+    const tipAng = Math.atan2(tip[1] - pre[1], tip[0] - pre[0]);
+    return { left, right, tip, tipAng, pts };
+  }
+
+  function smoothPath(points, move) {
+    if (move) ctx.moveTo(points[0][0], points[0][1]); else ctx.lineTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length - 1; i++) {
+      const mx = (points[i][0] + points[i+1][0]) / 2, my = (points[i][1] + points[i+1][1]) / 2;
+      ctx.quadraticCurveTo(points[i][0], points[i][1], mx, my);
+    }
+    const l = points[points.length - 1]; ctx.lineTo(l[0], l[1]);
+  }
+
+  function drawFurca(base, ang, side, phase, amp, spread) {
+    const a = ang + side * spread;
+    const L = FURCA_L;
+    // flessione della furca, sfasata rispetto al tronco
+    const bend = (0.25 * amp * Math.sin(phase + 1.2 + side * 0.6) + 0.12 * side) ;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const nx = -sa, ny = ca;
+    const tipx = base[0] + ca * L + nx * bend * L * 0.5;
+    const tipy = base[1] + sa * L + ny * bend * L * 0.5;
+    const cx = base[0] + ca * L * 0.55 + nx * bend * L * 0.35;
+    const cy = base[1] + sa * L * 0.55 + ny * bend * L * 0.35;
+    const w = FURCA_W / 2;
+    ctx.beginPath();
+    ctx.moveTo(base[0] + nx * w, base[1] + ny * w);
+    ctx.quadraticCurveTo(cx + nx * w * 0.7, cy + ny * w * 0.7, tipx, tipy);
+    ctx.quadraticCurveTo(cx - nx * w * 0.7, cy - ny * w * 0.7, base[0] - nx * w, base[1] - ny * w);
+    ctx.closePath();
+  }
+
+  function tailPath(g) {
+    ctx.beginPath();
+    smoothPath(g.left, true);
+    // punta arrotondata
+    const r = g.right.slice().reverse();
+    smoothPath(r, false);
+    ctx.closePath();
+  }
+
+  function paintTranslucent(edgeW, alpha) {
+    // alone di rifrazione chiaro, poi riempimento e bordo scuro
+    ctx.globalAlpha = alpha * 0.55;
+    ctx.strokeStyle = 'rgba(255,252,228,0.9)'; ctx.lineWidth = edgeW * 3.2; ctx.stroke();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(92,78,36,0.20)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(48,40,16,0.62)'; ctx.lineWidth = edgeW; ctx.stroke();
+  }
+
+  function drawTail(c, phase, amp, alpha, edgeW, detail) {
+    const g = tailGeometry(c, phase, amp);
+    // furche
+    for (const side of [-1, 1]) {
+      drawFurca(g.tip, g.tipAng, side, phase, amp, c.spread);
+      paintTranslucent(edgeW * 0.9, alpha);
+    }
+    tailPath(g);
+    paintTranslucent(edgeW, alpha);
+    if (detail) {
+      // tessitura interna del tronco caudale (fasci muscolari / cellule)
+      ctx.globalAlpha = alpha * 0.35;
+      ctx.strokeStyle = 'rgba(60,48,18,0.8)'; ctx.lineWidth = edgeW * 0.6;
+      ctx.beginPath(); smoothPath(g.pts.slice(1, -1), true); ctx.stroke();
+      ctx.fillStyle = 'rgba(70,55,20,0.5)';
+      for (let i = 2; i < g.pts.length - 2; i += 3) {
+        const p = g.pts[i]; ctx.beginPath(); ctx.arc(p[0], p[1] + ((i * 7) % 5 - 2) * 2, 2.2, 0, TAU); ctx.fill();
+      }
+    }
+    return g;
+  }
+
+  function drawBody(c, alpha, edgeW, detail) {
+    const pulse = Math.sin(c.bodyPh);
+    const a = BODY_L / 2 * (1 + 0.06 * pulse), b = BODY_W / 2 * (1 - 0.05 * pulse);
+    const cx = -a + 6;
+    ctx.beginPath();
+    const M = 40;
+    for (let i = 0; i <= M; i++) {
+      const u = i / M * TAU, cu = Math.cos(u);
+      // estremità anteriore (x negativa) leggermente affusolata, posteriore che si raccorda alla coda
+      const taper = 1 + 0.13 * cu - 0.10 * Math.pow(Math.max(0, cu), 6);
+      const x = cx + a * cu, y = b * Math.sin(u) * taper;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    // luce trasmessa: centro più chiaro
+    ctx.globalAlpha = alpha * 0.55;
+    ctx.strokeStyle = 'rgba(255,252,228,0.9)'; ctx.lineWidth = edgeW * 3.4; ctx.stroke();
+    ctx.globalAlpha = alpha;
+    const gr = ctx.createRadialGradient(cx + 10, -6, 4, cx, 0, a);
+    gr.addColorStop(0, 'rgba(255,246,205,0.30)');
+    gr.addColorStop(0.6, 'rgba(120,100,45,0.22)');
+    gr.addColorStop(1, 'rgba(70,58,22,0.40)');
+    ctx.fillStyle = gr; ctx.fill();
+    ctx.strokeStyle = 'rgba(44,36,14,0.70)'; ctx.lineWidth = edgeW * 1.1; ctx.stroke();
+
+    if (!detail) return;
+    ctx.save(); ctx.clip();
+    // ghiandole di penetrazione
+    for (const gl of c.glands) {
+      const gx = gl.x * (1 + 0.06 * pulse), gy = gl.y * (1 - 0.05 * pulse);
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.beginPath(); ctx.arc(gx, gy, gl.r, 0, TAU);
+      ctx.fillStyle = 'rgba(110,90,40,0.35)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(60,48,18,0.35)'; ctx.lineWidth = edgeW * 0.5; ctx.stroke();
+      ctx.fillStyle = 'rgba(55,42,14,0.75)';
+      for (const d of gl.dots) { ctx.beginPath(); ctx.arc(gx + d[0], gy + d[1], d[2], 0, TAU); ctx.fill(); }
+    }
+    // organo anteriore (testa) con margine spinoso
+    const hx = cx - a + 26;
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.beginPath(); ctx.ellipse(hx, 0, 24, b * 0.78, 0, 0, TAU);
+    ctx.fillStyle = 'rgba(85,70,30,0.22)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(50,40,15,0.45)'; ctx.lineWidth = edgeW * 0.7; ctx.stroke();
+    // dotti delle ghiandole che convergono all'apice
+    ctx.globalAlpha = alpha * 0.4; ctx.strokeStyle = 'rgba(60,46,16,0.7)'; ctx.lineWidth = edgeW * 0.45;
+    for (const s of [-1, 1]) for (const off of [6, 12]) {
+      ctx.beginPath(); ctx.moveTo(-60, s * off * 1.6);
+      ctx.quadraticCurveTo(hx + 20, s * off * 0.9, cx - a + 4, s * 3); ctx.stroke();
+    }
+    // acetabolo (ventosa ventrale)
+    const vx = cx + a * 0.38;
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.beginPath(); ctx.arc(vx, 3, 15, 0, TAU);
+    ctx.fillStyle = 'rgba(100,82,34,0.25)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(45,36,12,0.6)'; ctx.lineWidth = edgeW * 0.9; ctx.stroke();
+    ctx.beginPath(); ctx.arc(vx, 3, 7, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,248,215,0.35)'; ctx.lineWidth = edgeW * 0.8; ctx.stroke();
+    // riflesso lungo il dorso
+    ctx.globalAlpha = alpha * 0.35;
+    ctx.beginPath(); ctx.ellipse(cx + 8, -b * 0.45, a * 0.6, 4, 0, 0, TAU);
+    ctx.fillStyle = 'rgba(255,252,230,0.6)'; ctx.fill();
+    ctx.restore();
+  }
+
+  function drawCerc(c) {
+    const s = PXUM * c.z;
+    const focus = 0.85;
+    const blur = Math.abs(c.z - focus) * 6.5;
+    const alpha = clamp(0.35 + 0.75 * c.z, 0.35, 1) * (c.z > 1.2 ? 0.7 : 1);
+    const edgeW = Math.max(2.2, 0.9 / s);   // in µm
+    const detail = blur < 3;
+    ctx.save();
+    if (hasFilter && blur > 0.4) ctx.filter = `blur(${blur.toFixed(2)}px)`;
+    ctx.translate(c.x, c.y);
+    // reazione del corpo al battito: lieve oscillazione attorno alla giunzione
+    const sway = 0.10 * c.amp * Math.sin(c.phase + Math.PI);
+    ctx.rotate(c.th);
+    ctx.scale(s, s);
+    // scia di movimento della coda (motion blur del battito rapido)
+    if (c.amp > 0.35) {
+      for (let k = 2; k >= 1; k--) {
+        drawTail(c, c.phase - k * 0.6, c.amp, alpha * 0.14 * c.amp, edgeW, false);
+      }
+    }
+    drawTail(c, c.phase, c.amp, alpha, edgeW, detail);
+    ctx.rotate(sway);
+    drawBody(c, alpha, edgeW, detail);
+    ctx.restore();
+  }
+
+  function drawBackground(t) {
+    // luce di fondo (controluce) con lieve respiro
+    const cx = W * (0.52 + 0.04 * Math.sin(t * 0.05)), cy = H * (0.30 + 0.03 * Math.cos(t * 0.04));
+    const R = Math.hypot(W, H) * 0.75;
+    const breath = 0.03 * Math.sin(t * 0.7) + 0.015 * Math.sin(t * 2.3);
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    g.addColorStop(0, `rgb(${246 + breath * 200 | 0},${240 + breath * 200 | 0},${196})`);
+    g.addColorStop(0.18, 'rgb(226,222,160)');
+    g.addColorStop(0.45, 'rgb(150,160,92)');
+    g.addColorStop(0.75, 'rgb(70,86,48)');
+    g.addColorStop(1, 'rgb(24,34,20)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // fasci di luce dalla superficie
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 5; i++) {
+      const x0 = W * (0.15 + i * 0.19) + Math.sin(t * 0.11 + i * 1.7) * W * 0.05;
+      const ang = -0.22 + 0.05 * Math.sin(t * 0.07 + i);
+      ctx.save();
+      ctx.translate(x0, -H * 0.1); ctx.rotate(ang);
+      const bw = W * (0.05 + 0.03 * Math.sin(i * 2.1 + t * 0.2));
+      const lg = ctx.createLinearGradient(-bw, 0, bw, 0);
+      const a = 0.07 + 0.04 * Math.sin(t * 0.5 + i * 2.3);
+      lg.addColorStop(0, 'rgba(255,250,210,0)');
+      lg.addColorStop(0.5, `rgba(255,250,210,${a.toFixed(3)})`);
+      lg.addColorStop(1, 'rgba(255,250,210,0)');
+      const vg = ctx.createLinearGradient(0, 0, 0, H * 1.2);
+      ctx.fillStyle = lg;
+      ctx.globalAlpha = 1;
+      ctx.fillRect(-bw, 0, bw * 2, H * 1.3);
+      ctx.restore();
+    }
+    ctx.restore();
+
+    // bokeh: detriti fuori fuoco vicino all'obiettivo
+    for (const b of bokeh) {
+      const x = b.x, y = b.y;
+      const gg = ctx.createRadialGradient(x, y, 0, x, y, b.r);
+      const col = b.warm ? '120,105,50' : '60,75,40';
+      const a = b.a * (0.8 + 0.2 * Math.sin(t * 0.6 + b.ph));
+      gg.addColorStop(0, `rgba(${col},${a})`);
+      gg.addColorStop(0.75, `rgba(${col},${a * 0.8})`);
+      gg.addColorStop(1, `rgba(${col},0)`);
+      ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(x, y, b.r, 0, TAU); ctx.fill();
+    }
+  }
+
+  function drawParticles(t, front) {
+    for (const p of particles) {
+      if ((p.z > 0.95) !== front) continue;
+      const k = p.z;
+      const a = p.a * (0.6 + 0.4 * k);
+      if (p.kind === 1) {
+        // frammenti filamentosi (alghe/detrito)
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+        ctx.strokeStyle = `rgba(60,58,25,${a * 0.8})`; ctx.lineWidth = Math.max(0.6, p.r * 0.8 * k);
+        ctx.beginPath(); ctx.moveTo(-p.len * k, 0); ctx.quadraticCurveTo(0, p.len * 0.3 * k, p.len * k, 0); ctx.stroke();
+        ctx.restore();
+      } else {
+        ctx.fillStyle = `rgba(55,50,22,${a})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r * k, 0, TAU); ctx.fill();
+        if (p.r * k > 1.1) { ctx.fillStyle = `rgba(255,252,225,${a * 0.5})`;
+          ctx.beginPath(); ctx.arc(p.x - p.r * 0.3 * k, p.y - p.r * 0.3 * k, p.r * 0.35 * k, 0, TAU); ctx.fill(); }
+      }
+    }
+  }
+
+  function updateAmbient(dt, t) {
+    for (const p of particles) {
+      p.ph += dt * 0.7;
+      p.x += (Math.sin(p.ph) * 3 + 6 * Math.sin(t * 0.13 + p.z * 4)) * p.z * dt + randn() * 0.15;
+      p.y += (p.vy + Math.cos(p.ph * 0.8) * 2) * p.z * dt * 0.6 + randn() * 0.15;
+      p.rot += dt * 0.05;
+      if (p.x < -10) p.x = W + 10; else if (p.x > W + 10) p.x = -10;
+      if (p.y < -10) p.y = H + 10; else if (p.y > H + 10) p.y = -10;
+    }
+    for (const b of bokeh) {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < -60) b.x = W + 60; else if (b.x > W + 60) b.x = -60;
+      if (b.y < -60) b.y = H + 60; else if (b.y > H + 60) b.y = -60;
+    }
+  }
+
+  function drawPost(t) {
+    // vignettatura
+    const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.62);
+    v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(8,14,6,0.55)');
+    ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+    // grana
+    if (grainPat) {
+      ctx.save();
+      ctx.globalAlpha = 0.045; ctx.globalCompositeOperation = 'overlay';
+      const ox = (Math.sin(t * 91.7) * 1000) | 0, oy = (Math.cos(t * 57.3) * 1000) | 0;
+      ctx.translate(ox % 192, oy % 192);
+      ctx.fillStyle = grainPat; ctx.fillRect(-192, -192, W + 384, H + 384);
+      ctx.restore();
+    }
+  }
+
+  let T = 0, paused = false;
+  function step(dt) {
+    T += dt;
+    updateAmbient(dt, T);
+    for (const c of cercs) updateCerc(c, dt, T);
+  }
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none';
+    drawBackground(T);
+    drawParticles(T, false);
+    for (const c of cercs) drawCerc(c);
+    ctx.filter = 'none'; ctx.globalAlpha = 1;
+    drawParticles(T, true);
+    drawPost(T);
+  }
+
+  resize(); initScene();
+  window.addEventListener('resize', () => { const ow = W, oh = H; resize();
+    for (const o of [...particles, ...bokeh, ...cercs]) { o.x *= W / ow; o.y *= H / oh; } });
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+    if (e.key === 'h' || e.key === 'H') document.getElementById('hud').classList.toggle('hidden');
+  });
+  if (params.has('nohud')) document.getElementById('hud').classList.add('hidden');
+
+  // pre-riscaldamento: la scena parte già "vissuta"
+  for (let i = 0; i < 45; i++) step(1 / 30);
+
+  if (CAPTURE) {
+    window.__frame = (dt) => { step(dt); render(); return true; };
+    render();
+  } else {
+    let last = performance.now();
+    const loop = (now) => {
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      if (!paused) step(dt);
+      render();
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>
