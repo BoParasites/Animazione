@@ -91,7 +91,7 @@ def new_cerc(rng, z):
     c.phase = rng.uniform(0, 2 * math.pi)
     c.dphase = 0.0
     c.amp = 1.0 if c.swim else 0.1
-    c.spread = 0.75 if c.swim else 1.05
+    c.spread = 1.05 if c.swim else 0.12
     c.pulse = rng.uniform(0, 2 * math.pi)
     c.psi = rng.uniform(0, 2 * math.pi)
     c.speed = 650.0 if c.swim else 0.0
@@ -102,6 +102,9 @@ def new_cerc(rng, z):
     c.v = np.zeros(3)
     c.size = rng.normal(1.0, 0.05)
     c.vmax = rng.uniform(560, 760)          # µm/s, stimata
+    c.fwd = rng.random() < 0.5          # fase passiva: nuoto a testa avanti (True) o solo affondamento
+    c.head_first = False
+    c.arc = 0.0
     c.static = make_static(rng)
     return c
 
@@ -154,6 +157,12 @@ def start_rest(c, rng):
     c.sink_to = rng.uniform(0.25, 0.9) * FH
     c.drift = np.array([rng.normal(0, 10), 0.0, rng.normal(0, 4)])
     c.bend_target = rng.normal(0, 0.07)
+    c.head_first = c.fwd and rng.random() < 0.85
+    if c.head_first:
+        # nuoto corpo-avanti verso il basso, con traiettoria ad arco (Panzner et al. 2025, fig. 3)
+        c.timer = rng.uniform(2.6, 3.8)
+        c.rest_dir = unit(np.array([rng.normal(0, 0.45), -1.0, rng.normal(0, 0.25)]))
+        c.arc = rng.choice([-1, 1]) * rng.uniform(0.25, 0.6)
 
 
 def step_cerc(c, dt, t, rng):
@@ -169,10 +178,12 @@ def step_cerc(c, dt, t, rng):
     c.twitch = max(0.0, c.twitch - dt)
 
     sw = c.swim
-    amp_t = 1.0 if sw else (0.55 if c.twitch > 0 else 0.06)
-    c.amp += (amp_t - c.amp) * (1 - math.exp(-dt * (14 if sw or c.twitch > 0 else 4)))
-    c.spread += ((0.72 if sw else 1.08) - c.spread) * (1 - math.exp(-dt * 3))
-    f = c.freq if sw else (12.0 if c.twitch > 0 else 0.5)
+    hf = (not sw) and c.head_first
+    amp_t = 1.0 if sw else (0.6 if hf else (0.55 if c.twitch > 0 else 0.06))
+    c.amp += (amp_t - c.amp) * (1 - math.exp(-dt * (14 if sw or hf or c.twitch > 0 else 4)))
+    # furche divaricate nella fase attiva coda-avanti, tenute unite nella fase passiva
+    c.spread += ((1.05 if sw else 0.12) - c.spread) * (1 - math.exp(-dt * 4))
+    f = c.freq if sw else (0.75 * c.freq if hf else (12.0 if c.twitch > 0 else 0.5))
     c.dphase = 2 * math.pi * f
     c.phase += c.dphase * dt
     c.pulse += dt * (2.4 if sw else 0.7)
@@ -188,14 +199,21 @@ def step_cerc(c, dt, t, rng):
         target = unit(c.dir + 0.22 * (math.cos(c.psi) * a + math.sin(c.psi) * b))
         rate = 4.0
     else:
+        if hf:
+            ca, sa = math.cos(c.arc * dt), math.sin(c.arc * dt)
+            d = c.rest_dir
+            d = unit(np.array([d[0] * ca - d[1] * sa, d[0] * sa + d[1] * ca, d[2]]))
+            if d[1] > -0.4:          # resta diretta verso il basso (coda in alto)
+                c.arc = -c.arc
+            c.rest_dir = d
         target = c.rest_dir
-        rate = 1.3
+        rate = 2.0 if hf else 1.3
     c.e = unit(c.e + (target - c.e) * (1 - math.exp(-dt * rate)))
 
-    sp_t = c.vmax * (0.4 + 0.6 * c.amp) if sw else 0.0
-    c.speed += (sp_t - c.speed) * (1 - math.exp(-dt * (5 if sw else 3)))
+    sp_t = c.vmax * (0.4 + 0.6 * c.amp) if sw else (-0.45 * c.vmax if hf else 0.0)   # negativa: verso la testa
+    c.speed += (sp_t - c.speed) * (1 - math.exp(-dt * (5 if sw or hf else 3)))
     v = c.e * c.speed
-    if not sw:
+    if not sw and not hf:
         v = v + np.array([0.0, 115.0 * (1 - c.amp), 0.0])        # affondamento passivo, corpo in avanti
     v = v + c.drift + np.array([8 * math.sin(t * 0.11), 0, 0])
     # limiti morbidi in profondità
