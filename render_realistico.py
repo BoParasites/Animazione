@@ -183,9 +183,20 @@ def start_rest(c, rng):
         c.arc = rng.choice([-1, 1]) * rng.uniform(0.55, 0.9)
 
 
+def rotate(v, axis, ang):
+    """Rotazione di Rodrigues di v attorno ad axis (unitario)."""
+    ca, sa = math.cos(ang), math.sin(ang)
+    return v * ca + np.cross(axis, v) * sa + axis * np.dot(axis, v) * (1 - ca)
+
+
+def rand_axis(e, rng):
+    return unit(np.cross(e, rng.normal(0, 1, 3)))
+
+
 def step_thrash(c, dt, t, rng):
-    """Agitazione quasi sul posto (brief §5.3-5.4): raffiche irregolari di 0,5-3 s e pause di 0,2-1 s;
-    capriole di 180° in 3-5 fotogrammi ogni 0,5-1,5 s; corpo che cambia forma nelle pause."""
+    """Agitazione quasi sul posto (brief §5.3-5.4): raffiche irregolari di 0,5-3 s e pause di 0,2-1 s.
+    Capriole in 3D (l'asse può puntare verso l'obiettivo: l'animale si vede accorciato e capovolto),
+    con il corpo che si comprime a ogni capriola."""
     c.ttimer -= dt
     if c.ttimer <= 0:
         c.burst = not c.burst
@@ -193,46 +204,55 @@ def step_thrash(c, dt, t, rng):
         c.shape_T = rng.uniform(0.3, 1.0)
         c.bend_target = rng.normal(0, 0.12) if not c.burst else 0.0
         c.flip_t = rng.uniform(0.2, 0.8)
+        c.tumble_axis = rand_axis(c.e, rng)
+        c.tumble_w = rng.uniform(0.8, 2.0) * rng.choice([-1, 1])
     jitter_beat(c, dt, rng)
     if c.burst:
         c.amp += (1.0 - c.amp) * (1 - math.exp(-dt * 30))
         c.flip_t -= dt
         c.jerk -= dt
-        if c.flip_t <= 0:                       # capriola
+        if c.rot_left <= 0 and c.flip_t <= 0:            # capriola in 3D, 3-5 fotogrammi
             c.flip_t = rng.uniform(0.5, 1.5)
-            ang = rng.choice([-1, 1]) * math.pi * rng.uniform(0.8, 1.0)
-            c.flip_rate = 25.0
-        elif c.jerk <= 0:                       # piccoli cambi di rotta
+            c.rot_axis = rand_axis(c.e, rng)
+            c.rot_left = math.pi * rng.uniform(0.8, 1.05)
+            c.rot_w = c.rot_left / rng.uniform(0.10, 0.17)
+            c.squash = 1.0                                 # il corpo si comprime
+            c.bend_target = rng.choice([-1, 1]) * rng.uniform(0.15, 0.3)   # la coda si inarca nella capriola
+            c.roll_rate = rng.choice([-1, 1]) * 2 * math.pi * rng.uniform(1.0, 3.0)
+            c.jv = rng.choice([-1, 1]) * c.e * rng.uniform(400, 800) + rng.normal(0, 150, 3) * np.array([1, 1, 0.4])
+        elif c.rot_left <= 0 and c.jerk <= 0:              # piccoli cambi di rotta, anche fuori piano
             c.jerk = rng.uniform(0.1, 0.25)
-            ang = rng.normal(0, 0.45)
-            c.flip_rate = 10.0
+            c.rot_axis = rand_axis(c.e, rng)
+            c.rot_left = abs(rng.normal(0, 0.5))
+            c.rot_w = c.rot_left / rng.uniform(0.06, 0.12)
+            c.squash = max(c.squash, 0.4)
+            c.jv = rng.choice([-1, 1]) * c.e * rng.uniform(200, 450) + rng.normal(0, 100, 3) * np.array([1, 1, 0.4])
+        # rotazione esplicita (niente scorciatoie: l'asse passa davvero per la profondità)
+        if c.rot_left > 0:
+            d = min(c.rot_left, c.rot_w * dt)
+            c.e = unit(rotate(c.e, c.rot_axis, d))
+            c.rot_left -= d
         else:
-            ang = None
-        if ang is not None:
-            # scatto di traslazione: una frazione della lunghezza del corpo (brief §5.3)
-            c.jv = rng.choice([-1, 1]) * c.e * rng.uniform(400, 800) + rng.normal(0, 150, 3) * np.array([1, 1, 0.2])
-            ca, sa = math.cos(ang), math.sin(ang)
-            e = c.e
-            c.rest_dir = unit(np.array([e[0] * ca - e[1] * sa, e[0] * sa + e[1] * ca, e[2] * 0.5 + rng.normal(0, 0.1)]))
-        rate = c.flip_rate
-        el = 1.12 + 0.08 * math.sin(2 * math.pi * t / c.shape_T)
+            c.bend_target *= math.exp(-dt * 4)
+        c.e = unit(rotate(c.e, c.tumble_axis, c.tumble_w * dt))   # capitombolo lento continuo
+        el = 1.12 + 0.08 * math.sin(2 * math.pi * t / c.shape_T) - 0.45 * c.squash
     else:
         c.amp += (0.04 - c.amp) * (1 - math.exp(-dt * 30))
-        rate = 3.0
+        c.rot_left = 0.0
         el = 1.0 + 0.32 * math.sin(2 * math.pi * t / c.shape_T)     # fuso allungato <-> ovoide tozzo
-    g = 1 - math.exp(-dt * 10)
+    c.squash *= math.exp(-dt * 4.5)
+    g = 1 - math.exp(-dt * 14)
     c.elong += (el - c.elong) * g
     c.girth += (1.0 / math.sqrt(max(c.elong, 0.5)) ** 1.3 - c.girth) * g
     c.taper += (0.6 * max(0.0, c.elong - 1.0) - c.taper) * g
     c.bbend += (0.0 - c.bbend) * g
-    c.bend += (c.bend_target - c.bend) * g
+    c.bend += (c.bend_target - c.bend) * (1 - math.exp(-dt * 12))
     c.spread += ((1.3 if c.burst else 0.7) - c.spread) * (1 - math.exp(-dt * 8))
     c.dphase = 2 * math.pi * c.freq
     c.phase += c.dphase * dt
     c.pulse = 0.0
     c.roll_rate *= math.exp(-dt * 3)
     c.roll += c.roll_rate * dt
-    c.e = unit(c.e + (c.rest_dir - c.e) * (1 - math.exp(-dt * rate)))
     # deriva in profondità durante le raffiche: entra ed esce dal piano focale
     c.zph += dt * (1.6 if c.burst else 0.3)
     c.anchor = c.anchor + np.array([4.0 * math.sin(t * 0.2), 5.0, 0.0]) * dt
@@ -355,6 +375,12 @@ def simulate(n_frames, seed, warm=6.0):
         c.shape_T = 0.6
         c.zph = rng.uniform(0, 6.28)
         c.jv = np.zeros(3)
+        c.rot_left = 0.0
+        c.rot_axis = np.array([0, 0, 1.0])
+        c.rot_w = 0.0
+        c.squash = 0.0
+        c.tumble_axis = np.array([0, 0, 1.0])
+        c.tumble_w = 0.0
         c.rec_amp = 0.60                # ±34°: il corpo subisce passivamente (brief §5.3)
         c.amp = 0.04
     frames = []
