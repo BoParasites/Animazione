@@ -136,7 +136,7 @@ def cerc_shape(p, sz):
     N = 18
     sv = np.linspace(0, 1, N)
     L = TAIL_L * sz
-    th = -0.30 * kL + kL * sv + 2.0 * p['arch'] * sv
+    th = -0.30 * kL + kL * sv + 2.0 * p['arch'] * sv + p['tws'] * np.sin(2 * math.pi * sv)   # + coda a S
     thm = 0.5 * (th[1:] + th[:-1])
     ds = L / (N - 1)
     steps = np.outer(np.cos(thm) * ds, x) + np.outer(np.sin(thm) * ds, b)
@@ -165,7 +165,8 @@ def cerc_shape(p, sz):
     r2 = BODY_R2 * sz * (1 - 0.02 * pul) * p['girth']
     C = -eb * (a - 6)
     uu = np.linspace(-1, 1, 12)
-    B = C[None, :] + np.outer(uu * a * 0.97, eb) + np.outer(0.25 * p['bbend'] * a * (1 - uu) ** 2, n1b)
+    boff = 0.25 * p['bbend'] * a * (1 - uu) ** 2 + 0.30 * p['sbend'] * a * np.sin(math.pi * (1 - uu))   # C + S
+    B = C[None, :] + np.outer(uu * a * 0.97, eb) + np.outer(boff, n1b)
     # punti per la RFT: posizione, tangente, peso (lunghezza del tratto x fattore di spessore)
     X, T, Wt = [], [], []
     for pts, wf in ((B, 2.0 * p['girth']), (P, 1.0), (furcae[0][0], 0.6), (furcae[1][0], 0.6)):
@@ -221,7 +222,7 @@ def rft_solve(X, T, w, rhs_list, anchor=None):
 
 def default_params(rng):
     return dict(amp=0.0, phase=rng.uniform(0, 2 * math.pi), lag=1.0, kmax=2.0, famp=0.55, rec_amp=0.70,
-                spread=0.55, arch=0.0, bbend=0.0, elong=1.0, girth=1.0, taper=0.0, pulse=rng.uniform(0, 6.28),
+                spread=0.55, arch=0.0, bbend=0.0, sbend=0.0, tws=0.0, elong=1.0, girth=1.0, taper=0.0, pulse=rng.uniform(0, 6.28),
                 psi=rng.uniform(-0.4, 0.4))
 
 
@@ -373,35 +374,45 @@ def behave_normal(c, dt, t, rng):
 
 
 def behave_thrash(c, dt, t, rng):
-    """Agitazione: battito pieno, corpo e coda che si arrotolano e si distendono in modo non
-    reciproco, piano di battito che ruota. Rotazioni e traslazioni le calcola la RFT."""
+    """Agitazione a episodi: fasi agitate di 2,5-6 s (raffiche e brevi pause) alternate a fasi
+    tranquille di 1,5-5 s in cui il battito si ferma e l'animale scende piano. Durante l'agitazione
+    corpo e coda si contorcono a C e a S, il corpo si allunga e si accorcia."""
+    c.qtimer -= dt
+    if c.qtimer <= 0:
+        c.quiet = not c.quiet
+        c.qtimer = rng.uniform(1.5, 5.0) if c.quiet else rng.uniform(2.5, 6.0)
+        c.burst = not c.quiet
+        c.ttimer = rng.uniform(1.0, 3.0)
     c.ttimer -= dt
-    if c.ttimer <= 0:
+    if c.ttimer <= 0 and not c.quiet:
         c.burst = not c.burst
         c.ttimer = rng.uniform(1.0, 3.0) if c.burst else rng.uniform(0.15, 0.4)
+    if c.ttimer <= 0 or c.newb != c.burst:
+        c.newb = c.burst
         c.cf = rng.uniform(3.5, 5.5)
         c.psi_w = rng.choice([-1, 1]) * rng.uniform(1.0, 3.0)
-        c.tax = [unit(v) for v in rng.normal(0, 1, (3, 3))]
-        c.tf = rng.uniform(0.6, 1.6, 3)
-        c.tp = rng.uniform(0, 6.28, 3)
         c.p['lag'] = rng.choice([-1.0, 1.0])
         c.cside = rng.choice([-1.0, 1.0])
     jitter_beat(c, dt, rng)
     p = c.p
-    c.act += ((1.0 if c.burst else 0.0) - c.act) * (1 - math.exp(-dt * (12 if c.burst else 6)))
+    c.act += ((1.0 if c.burst else 0.0) - c.act) * (1 - math.exp(-dt * (12 if c.burst else (2.5 if c.quiet else 6))))
     act = c.act
-    p['amp'] += ((1.0 if c.burst else 0.15) - p['amp']) * (1 - math.exp(-dt * 25))
+    p['amp'] += ((1.0 if c.burst else (0.0 if c.quiet else 0.15)) - p['amp']) * (1 - math.exp(-dt * 25))
     c.cph += dt * 2 * math.pi * c.cf * (0.3 + act)
-    p['bbend'] = c.cside * 1.4 * act * (0.5 + 0.5 * math.sin(c.cph))
-    p['arch'] = c.cside * 1.0 * act * (0.5 + 0.5 * math.sin(c.cph + 0.5 * math.pi))       # sfasato: ciclo non reciproco
-    cr = act * abs(math.sin(c.cph))
-    p['elong'] += ((1.12 - 0.45 * cr) - p['elong']) * (1 - math.exp(-dt * 25))
+    ph = c.cph
+    p['bbend'] = c.cside * 1.6 * act * (0.5 + 0.5 * math.sin(ph))
+    p['sbend'] = 0.9 * act * math.sin(1.7 * ph + 1.0)
+    p['arch'] = c.cside * 1.4 * act * (0.5 + 0.5 * math.sin(ph + 0.5 * math.pi))   # sfasato: ciclo non reciproco
+    p['tws'] = 1.0 * act * math.sin(2.3 * ph + 0.4)
+    cr = act * abs(math.sin(ph))
+    quiet_shape = 0.10 * math.sin(2 * math.pi * 0.5 * t) * (1 - act)
+    p['elong'] += ((1.22 - 0.62 * cr + quiet_shape) - p['elong']) * (1 - math.exp(-dt * 25))
     p['girth'] = 1.0 / math.sqrt(max(p['elong'], 0.5)) ** 1.3
     p['taper'] = 0.5 * max(0.0, p['elong'] - 1.0)
     p['spread'] += ((1.2 - 0.6 * cr) - p['spread']) * (1 - math.exp(-dt * 15))
     p['psi'] += c.psi_w * act * dt
     p['rec_amp'] = 0.4
-    c.dphase = 2 * math.pi * c.freq
+    c.dphase = 2 * math.pi * c.freq if not c.quiet or p['amp'] > 0.02 else 0.0
     return THRASH_SPEED if c.burst else None
 
 
@@ -497,7 +508,7 @@ def simulate(n_frames, seed, warm=6.0):
         c.sink_to = y + rng.uniform(80, 200)
         c.prevX = None
     # due individui che si agitano quasi sul posto: uno a fuoco, uno un po' fuori fuoco
-    thrashers = ((cs[1], (0.70 * FW, 0.72 * FH, 20.0), 0.4), (cs[3], (0.26 * FW, 0.60 * FH, 190.0), 2.5)) if THRASH else ()
+    thrashers = ((cs[1], (0.70 * FW, 0.28 * FH, 20.0), 0.4), (cs[3], (0.26 * FW, 0.25 * FH, 190.0), 2.5)) if THRASH else ()
     for c, (x, y, z), t0 in thrashers:
         c.thrasher = True
         c.J = np.array([x, y, z])
@@ -505,12 +516,13 @@ def simulate(n_frames, seed, warm=6.0):
         c.burst, c.ttimer, c.act, c.cph = False, t0, 0.0, rng.uniform(0, 6.28)
         c.cf, c.psi_w, c.cside = 2.0, 4.0, 1.0
         c.tsw, c.tax_cur, c.tspd, c.wcur = 0.0, np.array([0, 0, 1.0]), 0.0, np.zeros(3)
+        c.quiet, c.qtimer, c.newb = False, rng.uniform(2.5, 6.0), False
         c.tax = [unit(v) for v in rng.normal(0, 1, (3, 3))]
         c.tf = rng.uniform(0.6, 1.6, 3)
         c.tp = rng.uniform(0, 6.28, 3)
         c.drift = np.zeros(3)
         c.prevX = None
-        calibrate_weight(c, factor=0.5)
+        calibrate_weight(c, factor=0.25)
         c.right = 0.0
         c.anchored = False                    # libere di andare in giro
     frames = []
@@ -736,12 +748,12 @@ def body_geom(s):
     return s['pos'] + R @ sh['C'], R @ sh['Rb'], sh['a'], sh['r1'], sh['r2']
 
 
-BEND = [0.0]   # curvatura del corpo dell'individuo in corso di rendering
+BEND = [0.0, 0.0]   # curvature (C, S) del corpo dell'individuo in corso di rendering
 
 
 def bend_off(u, a):
     # curvatura a falce: nulla alla giunzione con la coda (u=+1), massima all'apice (u=-1)
-    return 0.25 * BEND[0] * a * (1 - u) ** 2
+    return 0.25 * BEND[0] * a * (1 - u) ** 2 + 0.30 * BEND[1] * a * np.sin(math.pi * (1 - u))
 
 
 def body_point(C, R, a, vec):
@@ -755,6 +767,7 @@ def local_to_world(C, R, a, r1, r2, uvw):
 def render_cerc(pert, s, t):
     C, R, a, r1, r2 = body_geom(s)
     BEND[0] = s['bbend']
+    BEND[1] = s['p']['sbend']
     taus = np.linspace(0, EXPOSURE, TAIL_SAMPLES) if s['amp'] > 0.25 else np.array([EXPOSURE / 2])
     tails = [tail_geom(s, tau) for tau in taus]
 
