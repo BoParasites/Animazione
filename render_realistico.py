@@ -77,46 +77,198 @@ class Cerc:
     pass
 
 
+BEAT_HZ = 15.6        # Krishnamurthy et al. 2017 (dal brief)
+DT_SUB = 16           # passi di simulazione per fotogramma (~31 per battito)
+ZETA_T, ZETA_N = 1.0, 2.0
+RIGHTING = 3.0       # coppia di raddrizzamento in unità del peso (tarata a occhio)   # coefficienti di resistenza tangenziale/normale (RFT, rapporto ~2)
+
+
+def beat(ph):
+    # la coda passa rapidamente da una C all'altra e resta piegata per gran parte del ciclo
+    sn = math.sin(ph)
+    return math.copysign(abs(sn) ** 0.45, sn)
+
+
+def skew(v):
+    return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+
+
+def rotmat(axis, ang):
+    K = skew(axis)
+    return np.eye(3) * math.cos(ang) + math.sin(ang) * K + (1 - math.cos(ang)) * np.outer(axis, axis)
+
+
+def rotate(v, axis, ang):
+    return rotmat(axis, ang) @ v
+
+
+def rand_axis(e, rng):
+    return unit(np.cross(e, rng.normal(0, 1, 3)))
+
+
+def orthonorm(R):
+    e = unit(R[:, 0])
+    n1 = unit(R[:, 1] - np.dot(R[:, 1], e) * e)
+    return np.column_stack([e, n1, np.cross(e, n1)])
+
+
+def frame_from_e(e, spin=0.0):
+    ref = np.array([0, 0, 1.0]) if abs(e[2]) < 0.9 else np.array([1.0, 0, 0])
+    a = unit(np.cross(e, ref))
+    b = np.cross(e, a)
+    n1 = math.cos(spin) * a + math.sin(spin) * b
+    return np.column_stack([e, n1, np.cross(e, n1)])
+
+
+# ------------------------------------------------ forma prescritta, nel riferimento proprio
+# origine = giunzione corpo-coda; x = direzione della base della coda. Il moto rigido di questo
+# riferimento NON è prescritto: lo calcola la RFT.
+def cerc_shape(p, sz):
+    x = np.array([1.0, 0.0, 0.0])
+    psi = p['psi']
+    b = np.array([0.0, math.cos(psi), math.sin(psi)])      # piano di battito
+    bz = np.cross(x, b)
+    amp, ph, lag = p['amp'], p['phase'], p['lag']
+    # fusto della coda: curvatura a C che si inverte
+    kL = p['kmax'] * amp * beat(ph)
+    N = 18
+    sv = np.linspace(0, 1, N)
+    L = TAIL_L * sz
+    th = -0.30 * kL + kL * sv + 2.0 * p['arch'] * sv
+    thm = 0.5 * (th[1:] + th[:-1])
+    ds = L / (N - 1)
+    steps = np.outer(np.cos(thm) * ds, x) + np.outer(np.sin(thm) * ds, b)
+    P = np.vstack([np.zeros(3), np.cumsum(steps, axis=0)])
+    radii = (TAIL_R0 + (TAIL_R1 - TAIL_R0) * sv) * sz
+    # furca: cerniera morbida con ritardo
+    flap = p['famp'] * amp * beat(ph - 0.75 * math.pi * lag)
+    td = math.cos(th[-1] + flap) * x + math.sin(th[-1] + flap) * b
+    nf = unit(math.cos(0.5) * b + math.sin(0.5) * bz)
+    nf = unit(nf - np.dot(nf, td) * td)
+    furcae = []
+    q = np.linspace(0, 1, 7)
+    for side in (-1, 1):
+        d = unit(td * math.cos(p['spread']) + side * nf * math.sin(p['spread']))
+        bendf = 0.45 * amp * beat(ph - 0.9 * math.pi * lag + 0.3 * side) - 0.06
+        Q = P[-1][None, :] + np.outer(q * FURCA_L * sz, d) + np.outer(q ** 2 * FURCA_L * sz * bendf, td)
+        furcae.append((Q, (FURCA_R0 + (FURCA_R1 - FURCA_R0) * q) * sz))
+    # corpo: cerniera con ritardo (in controfase rispetto alla coda)
+    hb = -p['rec_amp'] * amp * beat(ph - 0.5 * math.pi * lag)
+    eb = math.cos(hb) * x + math.sin(hb) * b
+    n1b = unit(b - np.dot(b, eb) * eb)
+    n2b = np.cross(eb, n1b)
+    pul = math.sin(p['pulse'])
+    a = BODY_A * sz * (1 + 0.03 * pul) * p['elong']
+    r1 = BODY_R1 * sz * (1 - 0.02 * pul) * p['girth']
+    r2 = BODY_R2 * sz * (1 - 0.02 * pul) * p['girth']
+    C = -eb * (a - 6)
+    uu = np.linspace(-1, 1, 12)
+    B = C[None, :] + np.outer(uu * a * 0.97, eb) + np.outer(0.25 * p['bbend'] * a * (1 - uu) ** 2, n1b)
+    # punti per la RFT: posizione, tangente, peso (lunghezza del tratto x fattore di spessore)
+    X, T, Wt = [], [], []
+    for pts, wf in ((B, 2.0 * p['girth']), (P, 1.0), (furcae[0][0], 0.6), (furcae[1][0], 0.6)):
+        tg = np.gradient(pts, axis=0)
+        tg = tg / np.linalg.norm(tg, axis=1, keepdims=True)
+        seg = np.linalg.norm(np.diff(pts, axis=0), axis=1).mean()
+        X.append(pts)
+        T.append(tg)
+        Wt.append(np.full(len(pts), seg * wf))
+    return dict(C=C, Rb=np.column_stack([eb, n1b, n2b]), a=a, r1=r1, r2=r2, P=P, radii=radii, sv=sv,
+                furcae=furcae, lat=(b, bz), X=np.vstack(X), T=np.vstack(T), Wt=np.concatenate(Wt))
+
+
+def rft_solve(X, T, w, rhs_list, anchor=None):
+    """Resistive force theory: f_i = -K_i (U + Om x X_i + u_def_i). Somma forze = -F_ext,
+    somma momenti = -M_ext. Ogni rhs è (u_def (n,3), F_ext (3), punto di applicazione (3))."""
+    tt = T[:, :, None] * T[:, None, :]
+    K = (ZETA_T * tt + ZETA_N * (np.eye(3)[None] - tt)) * w[:, None, None]
+    S = np.zeros((len(X), 3, 3))
+    S[:, 0, 1], S[:, 0, 2] = -X[:, 2], X[:, 1]
+    S[:, 1, 0], S[:, 1, 2] = X[:, 2], -X[:, 0]
+    S[:, 2, 0], S[:, 2, 1] = -X[:, 1], X[:, 0]
+    KS = K @ S
+    A = np.zeros((6, 6))
+    A[:3, :3] = -K.sum(0)
+    A[:3, 3:] = KS.sum(0)
+    A[3:, :3] = -(S @ K).sum(0)
+    A[3:, 3:] = (S @ KS).sum(0)
+    if anchor is not None:
+        # punto vincolato (attaccato a un detrito): velocità nulla, la reazione Fa entra nei bilanci
+        Xa = anchor
+        Sa = skew(Xa)
+        A9 = np.zeros((9, 9))
+        A9[:6, :6] = A
+        A9[:3, 6:] = np.eye(3)
+        A9[3:6, 6:] = Sa
+        A9[6:, :3] = np.eye(3)
+        A9[6:, 3:6] = -Sa
+        A = A9
+    out = []
+    for item in rhs_list:
+        udef, F, Xg = item[:3]
+        Mx = item[3] if len(item) > 3 else np.zeros(3)
+        Ku = np.einsum('nij,nj->ni', K, udef)
+        rhs = np.concatenate([Ku.sum(0) - F, np.einsum('nij,nj->ni', S, Ku).sum(0) - np.cross(Xg, F) - Mx])
+        if anchor is not None:
+            ua = item[4] if len(item) > 4 else np.zeros(3)
+            rhs = np.concatenate([rhs, -ua])
+        sol = np.linalg.solve(A, rhs)
+        out.append((sol[:3], sol[3:6]))
+    return out
+
+
+def default_params(rng):
+    return dict(amp=0.0, phase=rng.uniform(0, 2 * math.pi), lag=1.0, kmax=2.0, famp=0.55, rec_amp=0.70,
+                spread=0.55, arch=0.0, bbend=0.0, elong=1.0, girth=1.0, taper=0.0, pulse=rng.uniform(0, 6.28),
+                psi=rng.uniform(-0.4, 0.4))
+
+
 def new_cerc(rng, z):
     c = Cerc()
-    c.pos = np.array([rng.uniform(-100, FW + 100), rng.uniform(0.08, 0.95) * FH, z], float)
-    c.e = unit(np.array([rng.normal(0, 0.4), -1.0, rng.normal(0, 0.3)]))
-    c.roll = rng.uniform(0, 2 * math.pi)
-    c.roll_rate = 0.0
-    c.swim = rng.random() < 0.45
-    c.timer = rng.uniform(0.2, 2.0 if c.swim else 4.0)
-    c.dir = unit(np.array([rng.normal(0, 0.5), -1.0, rng.normal(0, 0.25)]))
-    c.rest_dir = unit(np.array([rng.normal(0, 0.3), -1.0, rng.normal(0, 0.3)]))
+    c.J = np.array([rng.uniform(-100, FW + 100), rng.uniform(0.08, 0.95) * FH, z], float)
+    c.Rf = frame_from_e(unit(np.array([rng.normal(0, 0.3), -1.0, rng.normal(0, 0.2)])), rng.uniform(0, 6.28))
+    c.size = rng.normal(1.0, 0.05)
+    c.p = default_params(rng)
+    c.swim = rng.random() < 0.3
+    c.timer = rng.uniform(0.2, 2.5 if c.swim else 12.0)
     c.sink_to = rng.uniform(0.3, 0.9) * FH
     c.freq = BEAT_HZ * rng.uniform(0.85, 1.15)
     c.jt = rng.uniform(0, 0.4)
-    c.phase = rng.uniform(0, 2 * math.pi)
+    c.phase = c.p['phase']
     c.dphase = 0.0
-    c.amp = 1.0 if c.swim else 0.1
-    c.spread = 1.45 if c.swim else 0.55
-    c.pulse = rng.uniform(0, 2 * math.pi)
-    c.psi = rng.uniform(0, 2 * math.pi)
-    c.speed = 650.0 if c.swim else 0.0
     c.twitch = 0.0
-    c.bend = rng.normal(0, 0.06)
-    c.bend_target = c.bend
-    c.drift = np.array([rng.normal(0, 10), 0.0, rng.normal(0, 4)])
-    c.v = np.zeros(3)
-    c.size = rng.normal(1.0, 0.05)
+    c.bend_target = rng.normal(0, 0.05)
+    c.drift = np.array([rng.normal(0, 8), 0.0, rng.normal(0, 4)])
     c.vmax = rng.uniform(660, 740)          # µm/s: ~0,7 mm/s (brief)
-    c.fwd = rng.random() < 0.5          # fase passiva: nuoto a testa avanti (True) o solo affondamento
+    c.sink_v = rng.uniform(70, 130)         # µm/s: ~0,1 mm/s, diversa per individuo
+    c.fwd = rng.random() < 0.5              # fase passiva: nuoto a testa avanti (True) o solo affondamento
     c.head_first = False
-    c.arc = 0.0
+    c.arc_bias = 0.0
     c.thrasher = False
-    c.rec_amp = 0.35                    # oscillazione del corpo alla cerniera (rad)
-    c.rock = 0.0
-    c.sink_v = rng.uniform(70, 130)       # µm/s: ogni individuo affonda a modo suo
-    c.def_f = rng.uniform(0.35, 0.9, 2)    # Hz: allungamento/accorciamento continuo del corpo
+    c.def_f = rng.uniform(0.35, 0.9, 2)
     c.def_p = rng.uniform(0, 6.28, 2)
-    c.tilt_rate = 0.6
-    c.elong, c.girth, c.taper, c.bbend = 1.0, 1.0, 0.0, 0.0
+    c.prevX = None
+    c.U = np.zeros(3)
+    c.Om = np.zeros(3)
+    c.vlp = np.zeros(3)
+    c.vlp1 = np.zeros(3)
+    c.right = RIGHTING
+    c.anchored = False
+    c.A = None
+    c.mass_off = rng.normal(0, 0.5)
     c.static = make_static(rng)
+    calibrate_weight(c)
     return c
+
+
+def calibrate_weight(c, factor=1.0):
+    """Peso applicato al centro del corpo, tarato perché l'affondamento passivo valga sink_v."""
+    p = dict(c.p, amp=0.0)
+    sh = cerc_shape(p, c.size)
+    R = frame_from_e(np.array([0.0, -1.0, 0.0]))
+    X, T = sh['X'] @ R.T, sh['T'] @ R.T
+    (U, _), = rft_solve(X, T, sh['Wt'], [(np.zeros_like(X), np.array([0.0, 1.0, 0.0]), R @ sh['C'])])
+    c.Wg = factor * c.sink_v / max(U[1], 1e-9)
 
 
 def make_static(rng):
@@ -151,14 +303,6 @@ def make_static(rng):
     return s
 
 
-BEAT_HZ = 15.6        # Krishnamurthy et al. 2017 (dal brief)
-
-
-def beat(ph):
-    # la coda passa rapidamente da una C all'altra e resta piegata per gran parte del ciclo
-    sn = math.sin(ph)
-    return math.copysign(abs(sn) ** 0.45, sn)
-
 
 def jitter_beat(c, dt, rng):
     """Frequenza 15,6 Hz con variazioni ±15% e reset di fase casuali ogni 0,2-0,5 s (brief §5.2)."""
@@ -173,177 +317,145 @@ def jitter_beat(c, dt, rng):
 def start_swim(c, rng):
     c.swim = True
     c.timer = rng.uniform(1.0, 3.0)                       # brief: episodi di 1-3 s
-    zb = -np.sign(c.pos[2]) * min(abs(c.pos[2]) / 1600, 1) * 0.12
-    # traiettorie quasi verticali (tracce "colonnari")
-    c.dir = unit(np.array([np.clip(rng.normal(0, 0.12), -0.35, 0.35), -1.0, rng.normal(zb, 0.06)]))
-    c.roll_rate = rng.choice([-1, 1]) * 2 * math.pi * rng.uniform(0.0, 0.1)
 
 
 def start_rest(c, rng):
     c.swim = False
     c.timer = rng.uniform(10.0, 45.0)                     # brief: affondamento lungo, durata casuale
-    c.rest_dir = unit(np.array([rng.normal(0, 0.15), -1.0, rng.normal(0, 0.15)]))
     c.sink_to = rng.uniform(0.2, 0.95) * FH
-    c.drift = np.array([rng.normal(0, 9), 0.0, rng.normal(0, 4)])
-    c.sink_v = rng.uniform(70, 130)
-    c.rest_dir = unit(np.array([rng.normal(0, 0.25), -1.0, rng.normal(0, 0.25)]))
-    # all'arresto l'assetto resta storto e si raddrizza lentamente (il corpo pesante va in basso)
-    c.e = unit(rotate(c.e, rand_axis(c.e, rng), rng.uniform(0.35, 0.9)))
-    c.tilt_rate = rng.uniform(0.35, 0.8)
-    c.speed = 0.0
-    c.bend_target = rng.normal(0, 0.05)
+    c.drift = np.array([rng.normal(0, 8), 0.0, rng.normal(0, 4)])
+    c.bend_target = rng.normal(0, 0.15)     # forma un po' curva: in affondamento ciascuna si inclina a modo suo
     c.head_first = c.fwd and rng.random() < 0.6
     if c.head_first:
-        # nuoto corpo-avanti verso il basso, con traiettoria ad arco (Panzner et al. 2025, fig. 3)
+        # nuoto corpo-avanti (Panzner et al. 2025, fig. 3); la curvatura dell'arco nasce
+        # da una lieve asimmetria del battito
         c.timer = rng.uniform(2.6, 3.8)
-        c.rest_dir = unit(np.array([rng.normal(0, 0.45), -1.0, rng.normal(0, 0.25)]))
-        c.arc = rng.choice([-1, 1]) * rng.uniform(0.55, 0.9)
+        c.arc_bias = rng.choice([-1, 1]) * rng.uniform(0.04, 0.10)
 
 
-def rotate(v, axis, ang):
-    """Rotazione di Rodrigues di v attorno ad axis (unitario)."""
-    ca, sa = math.cos(ang), math.sin(ang)
-    return v * ca + np.cross(axis, v) * sa + axis * np.dot(axis, v) * (1 - ca)
+def behave_normal(c, dt, t, rng):
+    c.timer -= dt
+    y = c.J[1]
+    if c.swim:
+        if c.timer <= 0 or y < -40:
+            start_rest(c, rng)
+    else:
+        if (c.timer <= 0 and y >= c.sink_to) or y > FH + 80:
+            start_swim(c, rng)
+    jitter_beat(c, dt, rng)
+    if not c.swim and not c.head_first and c.twitch <= 0 and rng.random() < dt * 0.1:
+        c.twitch = rng.uniform(0.15, 0.4)
+    c.twitch = max(0.0, c.twitch - dt)
+    sw, hf = c.swim, (not c.swim) and c.head_first
+    tw = (not sw) and (not hf) and c.twitch > 0
+    p = c.p
+    amp_t = 1.0 if sw else (0.9 if hf else (0.7 if tw else 0.0))
+    p['amp'] += (amp_t - p['amp']) * (1 - math.exp(-dt * 30))     # parte e si ferma di colpo
+    p['lag'] = -1.0 if hf else 1.0                                  # il verso del ritardo decide coda/testa avanti
+    p['spread'] += ((1.45 if sw else (0.10 if hf else 0.55)) - p['spread']) * (1 - math.exp(-dt * 5))
+    arch_t = 0.0 if sw else (c.arc_bias if hf else c.bend_target)
+    p['arch'] += (arch_t - p['arch']) * (1 - math.exp(-dt * 2))
+    p['psi'] += rng.normal(0, 0.15) * math.sqrt(dt)
+    dfm = 0.13 * math.sin(2 * math.pi * c.def_f[0] * t + c.def_p[0]) + 0.07 * math.sin(2 * math.pi * c.def_f[1] * t + c.def_p[1])
+    p['elong'] += (((1.10 if sw else 1.0) + dfm) - p['elong']) * (1 - math.exp(-dt * 6))
+    p['girth'] = 1.0 / math.sqrt(p['elong']) ** 1.2
+    p['taper'] = 0.5 * max(0.0, p['elong'] - 1.05)
+    p['bbend'] *= math.exp(-dt * 3)
+    p['pulse'] += dt * (2.4 if sw else 0.5)
+    c.dphase = 2 * math.pi * c.freq if (sw or hf or tw) else 0.0
+    # velocità media di riferimento (vedi rft_step): risalita e testa avanti tarate sui dati
+    c.right = RIGHTING * (2.0 if (sw or hf) else 0.35)
+    return (c.vmax + c.sink_v) * 1.15 if sw else (0.7 * c.vmax if hf else None)
 
 
-def rand_axis(e, rng):
-    return unit(np.cross(e, rng.normal(0, 1, 3)))
-
-
-def step_thrash(c, dt, t, rng):
-    """Agitazione quasi sul posto: rotazione continua in 3D con velocità angolare che varia in modo
-    fluido (girate rapide di 180° in 0,15-0,3 s), corpo e coda che si arrotolano insieme a C
-    (accartocciamento) e si ridistendono, oscillazione del corpo attorno all'asse. Pause brevi."""
+def behave_thrash(c, dt, t, rng):
+    """Agitazione: battito pieno, corpo e coda che si arrotolano e si distendono in modo non
+    reciproco, piano di battito che ruota. Rotazioni e traslazioni le calcola la RFT."""
     c.ttimer -= dt
     if c.ttimer <= 0:
         c.burst = not c.burst
         c.ttimer = rng.uniform(0.8, 3.0) if c.burst else rng.uniform(0.2, 0.6)
-        c.wf = rng.uniform(0.5, 1.6, 3)            # Hz delle componenti della velocità angolare
-        c.wp = rng.uniform(0, 6.28, 3)
-        c.cf = rng.uniform(1.2, 2.6)               # Hz dei cicli di accartocciamento
+        c.cf = rng.uniform(2.0, 3.5)
+        c.psi_w = rng.choice([-1, 1]) * rng.uniform(3.0, 8.0)
+        c.p['lag'] = rng.choice([-1.0, 1.0])
+        c.cside = rng.choice([-1.0, 1.0])
     jitter_beat(c, dt, rng)
-    on = 1.0 if c.burst else 0.0
-    c.act += (on - c.act) * (1 - math.exp(-dt * (12 if c.burst else 6)))   # attacco rapido, rilascio morbido
+    p = c.p
+    c.act += ((1.0 if c.burst else 0.0) - c.act) * (1 - math.exp(-dt * (12 if c.burst else 6)))
     act = c.act
-    c.amp += ((1.0 if c.burst else 0.15) - c.amp) * (1 - math.exp(-dt * 25))
-
-    # velocità angolare 3D liscia e intensa (rad/s)
-    w = np.array([math.sin(2 * math.pi * c.wf[k] * t + c.wp[k]) for k in range(3)])
-    w = w * np.array([1.0, 1.0, 0.8])
-    w = w - np.dot(w, c.e) * c.e                  # solo rotazioni che cambiano la direzione dell'asse
-    wn = np.linalg.norm(w)
-    if wn > 1e-6:
-        c.e = unit(rotate(c.e, w / wn, 20.0 * act * wn * dt))
-    c.roll += 2 * math.pi * 2.0 * act * math.sin(2 * math.pi * 0.9 * t) * dt
-
-    # accartocciamento: corpo e coda si piegano dallo stesso lato (C), il corpo si accorcia
+    p['amp'] += ((1.0 if c.burst else 0.15) - p['amp']) * (1 - math.exp(-dt * 25))
     c.cph += dt * 2 * math.pi * c.cf * (0.3 + act)
-    cr = act * abs(math.sin(c.cph)) ** 1.5
-    side = 1.0 if math.sin(c.cph) >= 0 else -1.0
-    c.bbend += (side * 0.75 * cr - c.bbend) * (1 - math.exp(-dt * 30))
-    c.bend += (side * 0.45 * cr - c.bend) * (1 - math.exp(-dt * 30))
-    el = 1.12 - 0.50 * cr + 0.12 * (1 - act) * math.sin(2 * math.pi * 1.3 * t)
-    c.elong += (el - c.elong) * (1 - math.exp(-dt * 25))
-    c.girth = 1.0 / math.sqrt(max(c.elong, 0.5)) ** 1.3
-    c.taper = 0.5 * max(0.0, c.elong - 1.0)
-    c.spread += ((1.2 - 0.7 * cr) - c.spread) * (1 - math.exp(-dt * 15))
-
-    # oscillazione del corpo alla cerniera, fluida
-    c.rock_ph += dt * 2 * math.pi * (4.5 * act + 1.0)
-    c.rock = 0.40 * act * math.sin(c.rock_ph)
-
+    p['bbend'] = c.cside * 1.4 * act * (0.5 + 0.5 * math.sin(c.cph))
+    p['arch'] = c.cside * 1.0 * act * (0.5 + 0.5 * math.sin(c.cph + 0.5 * math.pi))       # sfasato: ciclo non reciproco
+    cr = act * abs(math.sin(c.cph))
+    p['elong'] += ((1.12 - 0.45 * cr) - p['elong']) * (1 - math.exp(-dt * 25))
+    p['girth'] = 1.0 / math.sqrt(max(p['elong'], 0.5)) ** 1.3
+    p['taper'] = 0.5 * max(0.0, p['elong'] - 1.0)
+    p['spread'] += ((1.2 - 0.6 * cr) - p['spread']) * (1 - math.exp(-dt * 15))
+    p['psi'] += c.psi_w * act * dt
+    p['rec_amp'] = 0.9
     c.dphase = 2 * math.pi * c.freq
+    return None
+
+
+def rft_step(c, dt, t, rng):
+    target = behave_thrash(c, dt, t, rng) if c.thrasher else behave_normal(c, dt, t, rng)
     c.phase += c.dphase * dt
-    c.pulse = 0.0
-    # resta nella sua zona; spinte brevi dalla coda nella direzione in cui punta
-    c.zph += dt * (1.2 * act + 0.3)
-    c.anchor = c.anchor + np.array([4.0 * math.sin(t * 0.2), 5.0, 0.0]) * dt
-    target = c.anchor + np.array([0.0, 0.0, 170.0 * math.sin(c.zph)])
-    v = (target - c.pos) * 3.0 + c.e * 220.0 * act * (1 - cr)
-    c.v = v
-    c.pos = c.pos + v * dt
-
-
-def step_cerc(c, dt, t, rng):
-    if c.thrasher:
-        step_thrash(c, dt, t, rng)
-        return
-    c.timer -= dt
-    if c.swim:
-        if c.timer <= 0 or c.pos[1] < -40:
-            start_rest(c, rng)
+    c.p['phase'] = c.phase
+    sh = cerc_shape(c.p, c.size)
+    Xb = sh['X']
+    udef_b = np.zeros_like(Xb) if c.prevX is None or len(c.prevX) != len(Xb) else (Xb - c.prevX) / dt
+    c.prevX = Xb
+    R = c.Rf
+    X, T, ud = Xb @ R.T, sh['T'] @ R.T, udef_b @ R.T
+    Fg = np.array([0.0, c.Wg, 0.0])
+    # coppia di raddrizzamento: corpo più denso, coda più leggera (forza netta nulla)
+    Xg = R @ (sh['C'] + c.mass_off * sh['r1'] * sh['Rb'][:, 1])
+    Fc = np.array([0.0, c.right * c.Wg, 0.0])
+    Mc = np.cross(Xg, Fc) - np.cross(R @ sh['P'][len(sh['P']) // 2], Fc)
+    if c.anchored:
+        # la punta anteriore (primo punto del corpo) resta ferma sul detrito
+        Xa = X[0]
+        (Ud, Od), (Ug, Og) = rft_solve(X, T, sh['Wt'], [(ud, np.zeros(3), np.zeros(3), np.zeros(3), ud[0]),
+                                                       (np.zeros_like(X), Fg, Xg, Mc, np.zeros(3))], anchor=Xa)
     else:
-        if (c.timer <= 0 and c.pos[1] >= c.sink_to) or c.pos[1] > FH + 80:
-            start_swim(c, rng)
-    jitter_beat(c, dt, rng)
-    # durante la discesa, ogni tanto qualche battito isolato
-    if not c.swim and not c.head_first and c.twitch <= 0 and rng.random() < dt * 0.1:
-        c.twitch = rng.uniform(0.15, 0.4)
-    c.twitch = max(0.0, c.twitch - dt)
-
-    sw = c.swim
-    hf = (not sw) and c.head_first
-    tw = (not sw) and (not hf) and c.twitch > 0
-    amp_t = 1.0 if sw else (0.9 if hf else (0.7 if tw else 0.0))
-    # il battito parte e si ferma di colpo (brief §2.2)
-    c.amp += (amp_t - c.amp) * (1 - math.exp(-dt * 30))
-    # furca: aperta a T in risalita, ripiegata/unita a testa avanti, semiaperta a V in affondamento
-    c.spread += ((1.45 if sw else (0.10 if hf else 0.55)) - c.spread) * (1 - math.exp(-dt * 5))
-    f = c.freq if (sw or hf or tw) else 0.0
-    c.dphase = 2 * math.pi * f
-    c.phase += c.dphase * dt
-    c.pulse += dt * (2.4 if sw else 0.5)
-    dfm = 0.13 * math.sin(2 * math.pi * c.def_f[0] * t + c.def_p[0]) + 0.07 * math.sin(2 * math.pi * c.def_f[1] * t + c.def_p[1])
-    el_t = (1.10 if sw else 1.0) + dfm          # in risalita allungato, poi allunga/accorcia di continuo
-    c.elong += (el_t - c.elong) * (1 - math.exp(-dt * 6))
-    c.girth = 1.0 / math.sqrt(c.elong) ** 1.2
-    c.taper = 0.5 * max(0.0, c.elong - 1.05)
-    c.bend += (c.bend_target * (0 if sw else 1) - c.bend) * (1 - math.exp(-dt * 1.5))
-    if not sw:
-        c.roll_rate += (0.12 * math.sin(t * 0.3 + c.psi) - c.roll_rate) * (1 - math.exp(-dt * 2))
-    c.roll += c.roll_rate * dt
-
-    if sw:
-        target = c.dir
-        rate = 8.0                                  # si riorienta in pochi cicli
-    else:
-        if hf:
-            ca, sa = math.cos(c.arc * dt), math.sin(c.arc * dt)
-            d = c.rest_dir
-            d = unit(np.array([d[0] * ca - d[1] * sa, d[0] * sa + d[1] * ca, d[2]]))
-            if d[1] > -0.4:          # resta diretta verso il basso (coda in alto)
-                c.arc = -c.arc
-            c.rest_dir = d
-        target = c.rest_dir
-        rate = 2.0 if hf else c.tilt_rate           # in affondamento il corpo si porta in basso adagio
-    c.e = unit(c.e + (target - c.e) * (1 - math.exp(-dt * rate)))
-
-    sp_t = c.vmax * (0.4 + 0.6 * c.amp) if sw else (-0.8 * c.vmax if hf else (0.45 * c.vmax * c.amp if tw else 0.0))
-    # a Re < 1 il moto parte e si ferma quasi istantaneamente
-    c.speed += (sp_t - c.speed) * (1 - math.exp(-dt * 25))
-    v = c.e * c.speed
-    if not sw and not hf:
-        v = v + np.array([0.0, c.sink_v * (1 - c.amp), 0.0])     # affondamento passivo ~0,1 mm/s, corpo in avanti
-    v = v + c.drift + np.array([4 * math.sin(t * 0.11), 0, 0])
-    # limiti morbidi in profondità
-    z = c.pos[2]
+        (Ud, Od), (Ug, Og) = rft_solve(X, T, sh['Wt'], [(ud, np.zeros(3), np.zeros(3)), (np.zeros_like(X), Fg, Xg, Mc)])
+    # La RFT con questa forma sottostima la velocità media (~0,2 contro 0,7 mm/s misurati):
+    # si scala SOLO la componente lenta (media) della propulsione; oscillazioni, rinculo e
+    # rotazioni restano quelle calcolate.
+    g = 1 - math.exp(-dt / 0.15)                      # filtro a due stadi: residuo a 15 Hz < 1%
+    c.vlp1 += (Ud - c.vlp1) * g
+    c.vlp += (c.vlp1 - c.vlp) * g
+    corr = np.zeros(3)
+    nv = np.linalg.norm(c.vlp)
+    if target is not None and nv > 1e-6:
+        corr = (target / nv - 1.0) * c.vlp * min(1.0, c.p['amp'])
+    U = Ud + corr + Ug + (np.zeros(3) if c.anchored else c.drift + np.array([4 * math.sin(t * 0.11), 0, 0]))
+    z = c.J[2]
     if abs(z) > 1500:
-        v[2] -= (z - math.copysign(1500, z)) * 2.0
-    c.v = v
-    c.pos = c.pos + v * dt
+        U[2] -= (z - math.copysign(1500, z)) * 2.0
+    Om = Od + Og
+    c.U, c.Om = U, Om
+    c.J = c.J + U * dt
+    wn = np.linalg.norm(Om)
+    if wn > 1e-12:
+        c.Rf = orthonorm(rotmat(Om / wn, wn * dt) @ c.Rf)
+    if c.anchored:
+        if c.A is None:
+            c.A = c.J + c.Rf @ Xb[0]
+        c.J = c.A - c.Rf @ Xb[0]          # il punto d'attacco resta esattamente sul detrito
     m = 420
-    if c.pos[0] < -m:
-        c.pos[0] += FW + 2 * m
-    elif c.pos[0] > FW + m:
-        c.pos[0] -= FW + 2 * m
+    if c.J[0] < -m:
+        c.J[0] += FW + 2 * m
+    elif c.J[0] > FW + m:
+        c.J[0] -= FW + 2 * m
 
 
 def snapshot(c):
-    return dict(pos=c.pos.copy(), v=c.v.copy(), e=c.e.copy(), roll=c.roll, roll_rate=c.roll_rate,
-                phase=c.phase, dphase=c.dphase, amp=c.amp, spread=c.spread, pulse=c.pulse,
-                bend=c.bend, size=c.size, static=c.static,
-                elong=c.elong, girth=c.girth, taper=c.taper, bbend=c.bbend, rec_amp=c.rec_amp,
-                rock=(c.rock if c.thrasher else None))
+    p = dict(c.p)
+    return dict(pos=c.J.copy(), R=c.Rf.copy(), U=c.U.copy(), Om=c.Om.copy(), p=p, dphase=c.dphase,
+                amp=p['amp'], bbend=p['bbend'], size=c.size, static=c.static, thrasher=c.thrasher,
+                anchor=c.A)
 
 
 def simulate(n_frames, seed, warm=6.0):
@@ -351,61 +463,40 @@ def simulate(n_frames, seed, warm=6.0):
     depths = [-1300, -820, -520, -300, -150, -60, 10, 70, 160, 360, 700, 1150]
     rng.shuffle(depths)
     cs = [new_cerc(rng, z) for z in depths[:N_CERC]]
-    sub = 8
-    dt = 1 / (FPS * sub)
+    dt = 1 / (FPS * DT_SUB)
     t = -warm
     for _ in range(int(warm / dt)):
         for c in cs:
-            step_cerc(c, dt, t, rng)
+            rft_step(c, dt, t, rng)
         t += dt
     # protagoniste vicino al piano di fuoco, nella zona centrale dell'inquadratura
     heroes = [(0.34 * FW, 0.40 * FH, -15.0), (0.64 * FW, 0.55 * FH, 30.0), (0.50 * FW, 0.22 * FH, 75.0)]
     for c, (x, y, z) in zip(cs, heroes):
-        c.pos = np.array([x, y, z])
+        c.J = np.array([x, y, z])
         start_rest(c, rng)
-        c.e = c.rest_dir.copy()
-        c.amp = 0.06
-        c.speed = 0.0
+        c.head_first = False
         c.timer = rng.uniform(1.0, 3.5)
         c.sink_to = y + rng.uniform(80, 200)
+        c.prevX = None
     # due individui che si agitano quasi sul posto: uno a fuoco, uno un po' fuori fuoco
-    thrashers = ((cs[1], (0.76 * FW, 0.62 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.70 * FH, 190.0), 2.5)) if THRASH else ()
+    thrashers = ((cs[1], (0.76 * FW, 0.45 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.55 * FH, 190.0), 2.5)) if THRASH else ()
     for c, (x, y, z), t0 in thrashers:
         c.thrasher = True
-        c.pos = np.array([x, y, z])
-        c.anchor = c.pos.copy()
-        c.e = unit(np.array([0.5, -1.0, 0.1]))
-        c.rest_dir = c.e.copy()
-        c.v = np.zeros(3)
-        c.burst = False
-        c.ttimer = t0
-        c.jerk = 0.0
-        c.flip_t = 0.5
-        c.flip_rate = 10.0
-        c.shape_T = 0.6
-        c.zph = rng.uniform(0, 6.28)
-        c.jv = np.zeros(3)
-        c.rot_left = 0.0
-        c.rot_axis = np.array([0, 0, 1.0])
-        c.rot_w = 0.0
-        c.squash = 0.0
-        c.tumble_axis = np.array([0, 0, 1.0])
-        c.tumble_w = 0.0
-        c.rock_ph = 0.0
-        c.rock_f = 3.0
-        c.act = 0.0
-        c.cph = rng.uniform(0, 6.28)
-        c.wf = rng.uniform(1.2, 3.5, 3)
-        c.wp = rng.uniform(0, 6.28, 3)
-        c.cf = 1.8
-        c.rec_amp = 0.60                # ±34°: il corpo subisce passivamente (brief §5.3)
-        c.amp = 0.04
+        c.J = np.array([x, y, z])
+        c.Rf = frame_from_e(unit(np.array([0.5, -1.0, 0.1])))
+        c.burst, c.ttimer, c.act, c.cph = False, t0, 0.0, rng.uniform(0, 6.28)
+        c.cf, c.psi_w, c.cside = 2.0, 4.0, 1.0
+        c.drift = np.zeros(3)
+        c.prevX = None
+        calibrate_weight(c, factor=0.15)       # quasi in equilibrio: restano nella loro zona
+        c.right = 0.0
+        c.anchored = True
     frames = []
     for f in range(n_frames):
         frames.append([snapshot(c) for c in cs])
-        for _ in range(sub):
+        for _ in range(DT_SUB):
             for c in cs:
-                step_cerc(c, dt, t, rng)
+                rft_step(c, dt, t, rng)
             t += dt
     return frames
 
@@ -599,71 +690,28 @@ def composite(pert, ox, oy, patch):
 
 
 # ---------------------------------------------------------------- geometria della cercaria
-def frame_axes(e, roll):
-    ref = np.array([0, 0, 1.0]) if abs(e[2]) < 0.9 else np.array([1.0, 0, 0])
-    a = unit(np.cross(e, ref))
-    b = np.cross(e, a)
-    n1 = math.cos(roll) * a + math.sin(roll) * b
-    n2 = np.cross(e, n1)
-    return n1, n2
+def frame_at(s, tau):
+    Om = s['Om']
+    wn = np.linalg.norm(Om)
+    R = rotmat(Om / wn, wn * tau) @ s['R'] if wn > 1e-9 else s['R']
+    return s['pos'] + s['U'] * tau, R
 
 
 def tail_geom(s, tau):
-    sz = s['size']
-    e = s['e']
-    J = s['pos'] + s['v'] * tau
-    phase = s['phase'] + s['dphase'] * tau
-    roll = s['roll'] + s['roll_rate'] * tau
-    amp = s['amp']
-    n1, n2 = frame_axes(e, roll)
-    N = 18
-    sv = np.linspace(0, 1, N)
-    L = TAIL_L * sz
-    # battito a C: curvatura quasi uniforme che si inverte a ogni mezzo ciclo (onda stazionaria,
-    # non viaggiante). La punta spazza ~±60-70° rispetto all'asse (brief §2.1, §5.3).
-    kL = 1.55 * amp * beat(phase)
-    th = -0.30 * kL + kL * sv + 2.0 * s['bend'] * sv          # angolo locale lungo il fusto (+ eventuale arco statico)
-    thm = 0.5 * (th[1:] + th[:-1])
-    ds = L / (N - 1)
-    steps = np.outer(np.cos(thm) * ds, e) + np.outer(np.sin(thm) * ds, n1)
-    P = J[None, :] + np.vstack([np.zeros(3), np.cumsum(steps, axis=0)])
-    radii = (TAIL_R0 + (TAIL_R1 - TAIL_R0) * sv) * sz
-    # furca: cerniera morbida, segue il fusto con un ritardo di fase maggiore (passiva)
-    tip = P[-1]
-    flap = 0.55 * amp * beat(phase - 0.75 * math.pi)
-    tdir = unit(math.cos(th[-1] + flap) * e + math.sin(th[-1] + flap) * n1)
-    nf = unit(math.cos(0.5) * n1 + math.sin(0.5) * n2)
-    nf = unit(nf - np.dot(nf, tdir) * tdir)
-    furcae = []
-    for side in (-1, 1):
-        d = unit(tdir * math.cos(s['spread']) + side * nf * math.sin(s['spread']))
-        q = np.linspace(0, 1, 7)
-        bend = 0.45 * amp * math.sin(phase - 0.9 * math.pi + 0.3 * side) - 0.06
-        Q = tip[None, :] + np.outer(q * FURCA_L * sz, d) + np.outer(q ** 2 * FURCA_L * sz * bend, tdir)
-        fr = (FURCA_R0 + (FURCA_R1 - FURCA_R0) * q) * sz
-        furcae.append((Q, fr))
-    return P, radii, furcae, (n1, n2), sv
+    J, R = frame_at(s, tau)
+    p = dict(s['p'])
+    p['phase'] += s['dphase'] * tau
+    sh = cerc_shape(p, s['size'])
+    P = J[None, :] + sh['P'] @ R.T
+    furcae = [(J[None, :] + Q @ R.T, fr) for Q, fr in sh['furcae']]
+    b, bz = sh['lat']
+    return P, sh['radii'], furcae, (R @ b, R @ bz), sh['sv']
 
 
 def body_geom(s):
-    sz = s['size']
-    e = s['e']
-    n1, n2 = frame_axes(e, s['roll'])
-    if s['rock'] is not None:          # agitate: il corpo oscilla avanti e indietro attorno a un asse
-        rec = s['rock']
-    else:                              # cerniera morbida: ritardo ~1/4 ciclo, in controfase
-        rec = -s['rec_amp'] * s['amp'] * beat(s['phase'] - 0.5 * math.pi)
-    eb = unit(e * math.cos(rec) + n1 * math.sin(rec))
-    n1b = unit(n1 - np.dot(n1, eb) * eb)
-    n2b = np.cross(eb, n1b)
-    p = math.sin(s['pulse'])
-    a = BODY_A * sz * (1 + 0.03 * p) * s['elong']
-    r1 = BODY_R1 * sz * (1 - 0.02 * p) * s['girth']
-    r2 = BODY_R2 * sz * (1 - 0.02 * p) * s['girth']
-    J = s['pos']
-    C = J - eb * (a - 6)                   # centro del corpo (l'asse va dal corpo verso la coda)
-    R = np.column_stack([eb, n1b, n2b])
-    return C, R, a, r1, r2
+    sh = cerc_shape(s['p'], s['size'])
+    R = s['R']
+    return s['pos'] + R @ sh['C'], R @ sh['Rb'], sh['a'], sh['r1'], sh['r2']
 
 
 BEND = [0.0]   # curvatura del corpo dell'individuo in corso di rendering
@@ -721,7 +769,7 @@ def render_cerc(pert, s, t):
     Ab = np.zeros((h, w), np.float32)
     uu = np.linspace(-1, 1, 33)
     prof = np.sqrt(np.clip(1 - uu ** 2, 0, 1)) ** 0.85 * (1 + 0.10 * uu) * (1 - 0.30 * np.clip(uu - 0.55, 0, 1) / 0.45)
-    prof = prof * (1 - 0.85 * s['taper'] * np.clip(-uu, 0, 1) ** 1.3)   # testa allungata e appuntita
+    prof = prof * (1 - 0.85 * s['p']['taper'] * np.clip(-uu, 0, 1) ** 1.3)   # testa allungata e appuntita
     prof = np.maximum(prof, 0.06)
     rmean = 0.5 * (r1 + r2)
     cen = C[None, :] + np.outer(uu * a * 0.97, R[:, 0]) + np.outer(bend_off(uu, a), R[:, 1])
@@ -919,6 +967,18 @@ def main():
     t0 = time.time()
     G['frames'] = simulate(n, args.seed)
     G['particles'] = make_particles(args.seed)
+    # detriti a cui sono attaccate le cercarie che si agitano
+    rngd = np.random.default_rng(args.seed + 5)
+    for sn in G['frames'][min(1, len(G['frames']) - 1)]:
+        if sn['anchor'] is None:
+            continue
+        d = dict(kind='floc', p0=sn['anchor'].copy(), v=np.zeros(3), jit=0.0, jf=np.zeros(2), jp=np.zeros(2),
+                 absc=ABS_ORGANIC, dens=0.03, rot0=0.0, rotv=0.0, tilt=0.0, ell=[])
+        for k in range(9):
+            r_ = rngd.uniform(4, 10)
+            off = rngd.normal(0, 9, 3) - 0.6 * r_ * unit(sn['pos'] - sn['anchor'])
+            d['ell'].append((off, np.array([r_, r_ * rngd.uniform(0.6, 1), r_ * rngd.uniform(0.6, 1)])))
+        G['particles'].append(d)
     G['static'] = build_static(args.seed)
     print(f'simulazione {time.time() - t0:.1f}s', flush=True)
 
@@ -926,13 +986,12 @@ def main():
         os.makedirs(args.outdir, exist_ok=True)
         rng = np.random.default_rng(3)
         tiles = []
-        for roll, amp, ph, z in ((0.0, 0.06, 0.0, 0.0), (1.2, 0.06, 0.0, 0.0), (0.4, 1.0, 1.0, 0.0), (0.0, 0.06, 0.0, 120.0)):
+        for roll, amp, ph, z in ((0.0, 0.0, 0.0, 0.0), (1.2, 0.0, 0.0, 0.0), (0.4, 1.0, 1.0, 0.0), (0.0, 0.0, 0.0, 120.0)):
             c = new_cerc(rng, z)
-            c.pos = np.array([FW / 2 + 60, FH / 2 + 120, z])
-            c.e = np.array([0.0, -1.0, 0.0]); c.roll = roll; c.amp = amp; c.phase = ph
-            c.spread = 1.05 if amp < 0.5 else 0.72; c.bend = 0.03
-            c.dphase = 2 * math.pi * 20 if amp > 0.5 else 0.0
-            c.roll_rate = 0.0; c.v = np.array([0, -600.0 if amp > 0.5 else 0, 0])
+            c.J = np.array([FW / 2 + 60, FH / 2 + 120, z])
+            c.Rf = frame_from_e(np.array([0.0, -1.0, 0.0]), roll)
+            c.p.update(amp=amp, phase=ph, spread=1.45 if amp > 0.5 else 0.55, arch=0.03)
+            c.dphase = 2 * math.pi * BEAT_HZ if amp > 0.5 else 0.0
             pert = np.zeros((H, W, 3), np.float32)
             render_cerc(pert, snapshot(c), 0.0)
             img = finish(G['static'], pert, 0.0, 0)
