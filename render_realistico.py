@@ -80,6 +80,8 @@ class Cerc:
 BEAT_HZ = 15.6        # Krishnamurthy et al. 2017 (dal brief)
 DT_SUB = 16           # passi di simulazione per fotogramma (~31 per battito)
 ZETA_T, ZETA_N = 1.0, 2.0
+THRASH_SPEED = 250.0  # µm/s, spostamento medio delle agitate durante le raffiche (stima)
+THRASH_TURN = 16.0    # rad/s di picco della rotazione prescritta per le agitate (tarata a occhio)
 RIGHTING = 3.0       # coppia di raddrizzamento in unità del peso (tarata a occhio)   # coefficienti di resistenza tangenziale/normale (RFT, rapporto ~2)
 
 
@@ -252,6 +254,8 @@ def new_cerc(rng, z):
     c.Om = np.zeros(3)
     c.vlp = np.zeros(3)
     c.vlp1 = np.zeros(3)
+    c.olp = np.zeros(3)
+    c.olp1 = np.zeros(3)
     c.right = RIGHTING
     c.anchored = False
     c.A = None
@@ -374,9 +378,12 @@ def behave_thrash(c, dt, t, rng):
     c.ttimer -= dt
     if c.ttimer <= 0:
         c.burst = not c.burst
-        c.ttimer = rng.uniform(0.8, 3.0) if c.burst else rng.uniform(0.2, 0.6)
-        c.cf = rng.uniform(2.0, 3.5)
-        c.psi_w = rng.choice([-1, 1]) * rng.uniform(3.0, 8.0)
+        c.ttimer = rng.uniform(1.0, 3.0) if c.burst else rng.uniform(0.15, 0.4)
+        c.cf = rng.uniform(3.5, 5.5)
+        c.psi_w = rng.choice([-1, 1]) * rng.uniform(1.0, 3.0)
+        c.tax = [unit(v) for v in rng.normal(0, 1, (3, 3))]
+        c.tf = rng.uniform(0.6, 1.6, 3)
+        c.tp = rng.uniform(0, 6.28, 3)
         c.p['lag'] = rng.choice([-1.0, 1.0])
         c.cside = rng.choice([-1.0, 1.0])
     jitter_beat(c, dt, rng)
@@ -393,9 +400,9 @@ def behave_thrash(c, dt, t, rng):
     p['taper'] = 0.5 * max(0.0, p['elong'] - 1.0)
     p['spread'] += ((1.2 - 0.6 * cr) - p['spread']) * (1 - math.exp(-dt * 15))
     p['psi'] += c.psi_w * act * dt
-    p['rec_amp'] = 0.9
+    p['rec_amp'] = 0.4
     c.dphase = 2 * math.pi * c.freq
-    return None
+    return THRASH_SPEED if c.burst else None
 
 
 def rft_step(c, dt, t, rng):
@@ -435,6 +442,17 @@ def rft_step(c, dt, t, rng):
     if abs(z) > 1500:
         U[2] -= (z - math.copysign(1500, z)) * 2.0
     Om = Od + Og
+    if c.thrasher:
+        # Libera in acqua, la RFT dà a un'agitata pochissima rotazione netta: le girate rapide sono
+        # prescritte come velocità angolare continua e liscia, sommata alle oscillazioni calcolate.
+        c.tsw -= dt
+        if c.tsw <= 0:                    # nuova girata: asse casuale, verso e velocità
+            c.tsw = rng.uniform(0.25, 0.7)
+            c.tax_cur = rand_axis(c.Rf[:, 0], rng)
+            c.tspd = rng.uniform(0.6, 1.0) * THRASH_TURN
+        w_t = c.tspd * c.act * (c.tax_cur - np.dot(c.tax_cur, c.Rf[:, 0]) * c.Rf[:, 0])
+        c.wcur += (w_t - c.wcur) * (1 - math.exp(-dt * 12))          # accelera e frena in modo liscio
+        Om = Om + c.wcur
     c.U, c.Om = U, Om
     c.J = c.J + U * dt
     wn = np.linalg.norm(Om)
@@ -479,18 +497,22 @@ def simulate(n_frames, seed, warm=6.0):
         c.sink_to = y + rng.uniform(80, 200)
         c.prevX = None
     # due individui che si agitano quasi sul posto: uno a fuoco, uno un po' fuori fuoco
-    thrashers = ((cs[1], (0.76 * FW, 0.45 * FH, 20.0), 0.4), (cs[3], (0.18 * FW, 0.55 * FH, 190.0), 2.5)) if THRASH else ()
+    thrashers = ((cs[1], (0.70 * FW, 0.72 * FH, 20.0), 0.4), (cs[3], (0.26 * FW, 0.60 * FH, 190.0), 2.5)) if THRASH else ()
     for c, (x, y, z), t0 in thrashers:
         c.thrasher = True
         c.J = np.array([x, y, z])
         c.Rf = frame_from_e(unit(np.array([0.5, -1.0, 0.1])))
         c.burst, c.ttimer, c.act, c.cph = False, t0, 0.0, rng.uniform(0, 6.28)
         c.cf, c.psi_w, c.cside = 2.0, 4.0, 1.0
+        c.tsw, c.tax_cur, c.tspd, c.wcur = 0.0, np.array([0, 0, 1.0]), 0.0, np.zeros(3)
+        c.tax = [unit(v) for v in rng.normal(0, 1, (3, 3))]
+        c.tf = rng.uniform(0.6, 1.6, 3)
+        c.tp = rng.uniform(0, 6.28, 3)
         c.drift = np.zeros(3)
         c.prevX = None
-        calibrate_weight(c, factor=0.15)       # quasi in equilibrio: restano nella loro zona
+        calibrate_weight(c, factor=0.5)
         c.right = 0.0
-        c.anchored = True
+        c.anchored = False                    # libere di andare in giro
     frames = []
     for f in range(n_frames):
         frames.append([snapshot(c) for c in cs])
