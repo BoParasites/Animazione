@@ -165,59 +165,80 @@
   function closedPath(pts) { const c = makeCurve(pts, true); const p = polyPath(c.pts); p.closePath(); return p; }
 
   // ---------- Anatomia (coordinate di scena, vista frontale) ----------
-  const BOX = { x0: 84, y0: 16, x1: 772, y1: 918 };
-  const R = [[326,150],[329,178],[338,196],[372,207],[418,216],[446,234],[460,268],[466,320],[472,380],[482,440],[492,500],[500,555],[506,592],[500,622],[486,628],[474,612],[470,580],[460,520],[448,460],[438,400],[428,340],[418,300],
-             [402,318],[398,370],[392,420],[383,470],[386,520],[396,570],[404,610],[402,660],[394,720],[384,790],[376,862],[340,862],[334,790],[324,760],[312,750]];
-  const BODY = [...R, [300, 748], ...R.slice().reverse().map(([x, y]) => [600 - x, y])];
+  // Organi e percorso interno sono disegnati in uno spazio "schema" e mappati sul corpo:
+  // il torace viene allargato e il tronco proporzionato a una testa di ~180 unità (canone di 8 teste).
+  const m = pts => pts.map(([x, y]) => [300 + (x - 300) * 1.22, 200 + (y - 152) * 0.906]);
+  const mirror = pts => pts.slice().reverse().map(([x, y]) => [600 - x, y]);
+  const BOX = { x0: 30, y0: 14, x1: 880, y1: 952 };
+  const GROUND = 862;
+
+  const HEAD_R = [[300,26],[330,29],[352,42],[364,64],[369,92],[367,112],[372,106],[380,114],[382,132],[377,152],[369,161],[363,168],[353,185],[338,200],[320,209],[300,212]];
+  const HEAD = [...HEAD_R, ...mirror(HEAD_R).slice(1, -1)];
+  const BODY_R = [[334,198],[336,226],[346,244],[374,258],[418,271],[460,284],[492,300],[512,326],[521,360],[526,420],[530,480],[535,540],[539,575],[545,630],[551,690],[555,745],[561,790],[557,826],[545,843],[531,836],[526,802],[523,762],[516,720],[508,662],[499,602],[492,560],[486,500],[480,442],[473,396],[464,370],
+                  [452,394],[448,440],[447,500],[438,560],[442,612],[452,662],[458,720],[459,772],[453,830],[444,884],[352,884],[341,824],[326,782],[310,766]];
+  const BODY = [...BODY_R, [300, 764], ...mirror(BODY_R)];
 
   const ORGANS = {
-    lungR:   [[268,226],[252,236],[234,262],[220,300],[212,345],[210,390],[218,418],[240,424],[264,418],[280,410],[286,380],[288,340],[286,300],[282,262],[276,236]],
-    lungL:   [[332,226],[348,236],[366,262],[380,300],[388,345],[390,392],[382,420],[360,426],[346,418],[346,398],[334,372],[322,348],[316,310],[316,270],[322,240]],
-    heart:   [[288,340],[304,330],[324,334],[340,350],[348,372],[342,396],[324,412],[304,414],[288,404],[280,384],[280,360]],
-    liver:   [[206,436],[236,426],[272,424],[306,428],[338,432],[358,440],[350,456],[326,470],[296,486],[264,498],[232,500],[212,488],[204,464]],
-    stomach: [[346,428],[364,418],[386,422],[402,440],[408,466],[402,494],[384,514],[358,526],[332,526],[318,518],[322,504],[344,502],[366,492],[378,472],[374,452],[360,442],[348,446]],
+    lungR:   m([[262,222],[248,228],[234,244],[222,268],[212,300],[206,340],[203,380],[206,414],[214,428],[234,420],[256,414],[274,410],[284,402],[288,382],[286,356],[290,330],[290,304],[286,272],[278,242],[270,226]]),
+    lungL:   m([[338,222],[352,228],[366,244],[378,268],[388,300],[394,340],[397,380],[396,414],[390,430],[370,424],[352,420],[340,416],[344,404],[352,388],[352,368],[344,352],[330,342],[318,330],[314,304],[316,272],[322,242],[330,226]]),
+    heart:   m([[292,318],[300,312],[312,316],[322,322],[332,326],[340,334],[346,350],[352,372],[354,392],[348,404],[336,412],[318,416],[300,414],[288,406],[282,390],[280,368],[282,344],[286,328]]),
+    liver:   m([[200,458],[204,440],[220,428],[248,421],[280,423],[310,427],[340,431],[366,436],[384,444],[372,452],[346,458],[320,465],[302,470],[286,480],[266,494],[244,506],[222,511],[208,502],[201,482]]),
+    gall:    m([[256,492],[266,489],[273,500],[271,514],[263,519],[256,508]]),
+    stomach: m([[348,420],[354,410],[368,402],[386,402],[400,412],[408,430],[411,456],[410,482],[402,506],[386,524],[364,534],[340,536],[322,532],[312,524],[312,512],[326,506],[344,500],[362,492],[372,476],[368,456],[358,440],[348,432]]),
+    spleen:  m([[404,430],[416,436],[424,452],[422,472],[412,480],[404,470],[406,452],[400,440]]),
+    kidneyR: [[236,528],[222,540],[216,562],[220,584],[234,594],[248,588],[254,574],[248,563],[251,550],[256,538],[248,529]],
+    kidneyL: mirror([[236,518],[222,530],[216,552],[220,574],[234,584],[248,578],[254,564],[248,553],[251,540],[256,528],[248,519]]),
+    bladder: [[300,704],[318,708],[328,720],[322,734],[300,740],[278,734],[272,720],[282,708]],
   };
+  // [punti, larghezza, colore h s l, alfa] — vasi e vie aeree
   const TUBES = {
-    esophagus: [[302,158],[306,200],[310,260],[314,320],[320,370],[332,402],[348,424]],
-    trachea:   [[296,164],[296,200],[296,240],[296,290]],
-    bronchR:   [[296,290],[280,302],[264,318],[254,340],[244,362],[236,378]],
-    bronchL:   [[296,290],[314,302],[330,318],[342,340]],
-    ivc:       [[284,700],[284,620],[285,540],[286,470],[287,430],[289,398]],
-    portal:    [[346,596],[322,592],[302,578],[291,548],[282,512],[274,486]],
-    hepatic:   [[238,452],[262,442],[285,436]],
-    pulmTrunk: [[314,350],[306,328],[288,320],[266,324]],
-    pulmL:     [[306,328],[324,320],[342,326]],
-    duodenum:  [[322,516],[306,522],[295,538],[297,555],[313,566],[334,563],[346,558]],
-    coil:      [[346,558],[360,572],[366,588],[350,600],[310,598],[270,596],[250,608],[262,624],[300,626],[340,624],[362,636],[356,652],[320,658],[280,655],[248,654],[236,650]],
-    colon:     [[238,672],[228,650],[224,610],[225,570],[230,548],[244,536],[270,532],[300,534],[340,534],[376,532],[392,544],[397,580],[396,620],[392,654],[374,674],[340,677],[316,688],[304,708],[300,728],[300,744]],
-    appendix:  [[236,676],[244,690],[240,702]],
+    aorta:     m([[308,344],[304,318],[306,296],[318,286],[332,292],[336,312],[334,350],[330,420],[322,500],[314,580],[308,640]]),
+    iliacR:    m([[308,640],[292,664],[276,700]]),
+    iliacL:    m([[308,640],[326,664],[342,700]]),
+    svc:       m([[290,338],[290,300],[290,262],[288,240]]),
+    brachioR:  m([[288,240],[268,234],[246,232]]),
+    brachioL:  m([[288,240],[316,234],[350,230]]),
+    esophagus: m([[302,150],[306,200],[310,260],[314,320],[320,370],[332,402],[350,422]]),
+    trachea:   m([[296,164],[296,200],[296,240],[296,290]]),
+    bronchR:   m([[296,290],[280,302],[264,318],[254,340],[244,362],[236,378]]),
+    bronchL:   m([[296,290],[314,302],[330,318],[342,340]]),
+    ivc:       m([[284,700],[284,620],[285,540],[286,470],[287,430],[289,398]]),
+    portal:    m([[346,596],[322,592],[302,578],[291,548],[282,512],[274,486]]),
+    hepatic:   m([[238,452],[262,442],[285,436]]),
+    pulmTrunk: m([[314,350],[306,328],[288,320],[266,324]]),
+    pulmL:     m([[306,328],[324,320],[342,326]]),
+    duodenum:  m([[316,518],[304,526],[294,540],[294,556],[306,568],[326,568],[342,560],[350,556]]),
+    coil:      m([[346,556],[362,566],[366,578],[352,586],[320,583],[286,582],[258,586],[246,596],[256,606],[290,604],[326,602],[356,606],[366,618],[352,627],[316,624],[280,625],[252,630],[244,642],[260,649],[296,646],[334,646],[358,652],[364,664],[346,671],[306,668],[270,670],[248,666],[238,660]]),
+    colon:     m([[238,690],[230,664],[225,630],[224,590],[228,556],[240,540],[268,532],[300,533],[340,533],[378,530],[396,540],[402,575],[402,620],[398,656],[380,674],[346,678],[318,688],[304,708],[300,728],[300,744]]),
+    appendix:  m([[238,692],[248,706],[244,718]]),
+    pancreas:  [[300,566],[318,554],[348,544],[382,526],[410,506],[432,490]],
   };
-  const BRONCHIOLES = [
-    [[264,318],[246,312],[232,300]], [[254,340],[236,338],[222,344]], [[244,362],[226,366]], [[280,302],[270,280],[262,258]],
-    [[330,318],[350,312],[364,300]], [[342,340],[358,352],[370,368]], [[342,340],[346,370],[350,396]], [[314,302],[326,280],[334,258]],
+  const HEART_C = m([[316,370]])[0];
+  const ALVEOLI = m([[230,376],[236,384],[226,386],[233,392],[240,378],[222,378]]);
+  const FISSURES = [
+    m([[206,326],[240,322],[268,326],[288,320]]), m([[214,300],[236,352],[256,394],[270,410]]), m([[386,282],[372,330],[360,372],[352,410]]),
   ];
-  const ALVEOLI = [[230,376],[236,384],[226,386],[233,392],[240,378],[222,378]];
   const LABELS = [
-    ['Trachea', 288, 206, 'right'], ['Esofago', 328, 228, 'left'], ['Polmoni', 362, 286, 'center'],
-    ['Cuore', 350, 362, 'left'], ['Fegato', 236, 484, 'center'], ['Stomaco', 414, 470, 'left'],
-    ['Duodeno', 288, 568, 'right'], ['Vena porta', 268, 530, 'right'], ['Intestino tenue', 408, 604, 'left'],
-    ['Colon', 218, 596, 'right'], ['Alveoli', 216, 404, 'right'],
-    ['Suolo', 760, 902, 'right'], ['mani · verdure crude · acqua', 650, 616, 'left'],
+    ['Trachea', 286, 236, 'right'], ['Esofago', 334, 242, 'left'], ['Polmoni', 382, 318, 'center'],
+    ['Cuore', 366, 398, 'left'], ['Fegato', 222, 498, 'center'], ['Stomaco', 434, 512, 'left'], ['Milza', 458, 462, 'left'],
+    ['Duodeno', 282, 578, 'right'], ['Vena porta', 262, 540, 'right'], ['Intestino tenue', 434, 612, 'left'],
+    ['Colon', 194, 600, 'right'], ['Alveoli', 196, 428, 'right'], ['Vescica', 340, 726, 'left'],
+    ['Suolo', 872, 938, 'right'], ['mani\nverdure crude\nacqua', 708, 590, 'left'],
   ];
 
   // ---------- Percorso continuo (un unico anello chiuso) ----------
   const ROUTE = [
-    ['ingest',    [[300,134],[301,156],[305,190],[308,240],[311,300],[316,360],[328,400],[346,420],[368,433],[386,452],[390,476],[376,498],[352,510],[324,514]]],
-    ['hatch',     [[306,522],[295,538],[297,555],[313,565],[334,561],[352,562],[362,575],[360,590]]],
-    ['liver',     [[342,594],[318,590],[300,576],[290,546],[282,510],[272,484],[252,470],[232,462],[240,446],[264,440],[284,436]]],
-    ['heart',     [[287,418],[289,396],[296,388],[308,396],[322,386],[320,362],[312,342],[302,326],[284,320]]],
-    ['lungs',     [[266,324],[250,336],[240,354],[234,372],[228,386]]],
-    ['ascent',    [[240,382],[250,364],[256,342],[266,320],[282,302],[296,290],[296,255],[296,215],[296,182],[297,163]]],
-    ['swallow',   [[304,158],[312,170],[316,200],[318,250],[320,305],[324,358],[336,395],[352,412],[372,428],[392,448],[398,478],[382,504],[354,518],[326,522],[310,530],[301,544],[304,558],[318,570],[338,568]]],
-    ['adult',     [[360,574],[365,589],[350,600],[310,598],[270,596],[250,608],[262,624],[300,626],[340,624],[362,636],[356,652],[320,658],[280,655],[248,654]]],
-    ['eggs',      [[236,652],[227,620],[226,580],[230,552],[244,538],[270,533],[300,535],[340,535],[376,533],[392,546],[396,582],[395,622],[391,654],[373,673],[340,676],[316,688],[304,708],[300,728],[300,745]]],
-    ['soil',      [[300,772],[303,805],[314,834],[340,856],[380,866],[430,870],[480,866],[520,860]]],
-    ['contagion', [[560,846],[598,822],[624,780],[636,710],[638,620],[630,510],[612,400],[584,300],[540,220],[476,168],[404,146],[344,136]]],
+    ['ingest',    m([[300,119],[301,150],[305,190],[308,240],[311,300],[316,360],[328,400],[346,420],[368,433],[386,452],[390,476],[376,498],[352,510],[324,514]])],
+    ['hatch',     m([[306,522],[295,538],[297,555],[313,565],[334,561],[352,562],[362,575],[360,590]])],
+    ['liver',     m([[342,594],[318,590],[300,576],[290,546],[282,510],[272,484],[252,470],[232,462],[240,446],[264,440],[284,436]])],
+    ['heart',     m([[287,418],[289,396],[296,388],[308,396],[322,386],[320,362],[312,342],[302,326],[284,320]])],
+    ['lungs',     m([[266,324],[250,336],[240,354],[234,372],[228,386]])],
+    ['ascent',    m([[240,382],[250,364],[256,342],[266,320],[282,302],[296,290],[296,255],[296,215],[296,182],[297,163]])],
+    ['swallow',   m([[304,158],[312,170],[316,200],[318,250],[320,305],[324,358],[336,395],[352,412],[372,428],[392,448],[398,478],[382,504],[354,518],[326,522],[310,530],[301,544],[304,558],[318,570],[338,568]])],
+    ['adult',     TUBES.coil.slice(1, -1)],
+    ['eggs',      m([[240,664],[229,630],[226,590],[229,558],[240,542],[268,534],[300,535],[340,535],[378,532],[394,544],[399,578],[399,620],[395,654],[378,671],[346,676],[318,688],[304,708],[300,728],[300,745]])],
+    ['soil',      [[300,772],[302,812],[312,848],[338,874],[380,886],[430,890],[480,887],[530,880]]],
+    ['contagion', [[580,868],[622,848],[660,808],[684,740],[694,650],[690,540],[676,430],[650,330],[606,250],[540,196],[452,170],[372,166]]],
   ];
 
   const STAGES = [
@@ -295,18 +316,43 @@
 
   const hsla = (h, s, l, a) => `hsla(${h},${s}%,${l}%,${a})`;
 
-  function organ(c, pts, h, s, l, a = 1) {
-    const p = closedPath(pts);
+  // nastro a larghezza variabile lungo una curva (intestino, pancreas…), con estremità arrotondate
+  function ribbon(curve, wFn) {
+    const P = curve.pts, n = P.length, Lf = [], Rt = [];
+    for (let k = 0; k < n; k++) {
+      const a = P[Math.max(0, k - 1)], b = P[Math.min(n - 1, k + 1)];
+      const d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, nx = -(b[1] - a[1]) / d, ny = (b[0] - a[0]) / d;
+      const w = wFn(curve.cum[k], curve.len) / 2;
+      Lf.push([P[k][0] + nx * w, P[k][1] + ny * w, nx, ny, w]); Rt.push([P[k][0] - nx * w, P[k][1] - ny * w]);
+    }
+    const p = new Path2D();
+    p.moveTo(Lf[0][0], Lf[0][1]);
+    for (let k = 1; k < n; k++) p.lineTo(Lf[k][0], Lf[k][1]);
+    { const e = Lf[n - 1], an = Math.atan2(e[3], e[2]); p.arc(P[n - 1][0], P[n - 1][1], e[4], an, an - Math.PI, true); }
+    for (let k = n - 1; k >= 0; k--) p.lineTo(Rt[k][0], Rt[k][1]);
+    { const e = Lf[0], an = Math.atan2(e[3], e[2]); p.arc(P[0][0], P[0][1], e[4], an + Math.PI, an, true); }
+    p.closePath();
+    return { path: p, L: Lf, R: Rt };
+  }
+
+  // superficie "di vetro": riempimento con luce dall'alto a sinistra, bordo interno sfumato, profilo netto
+  function glass(c, p, box, h, s, l, a = 1, rim = 12) {
+    const [x0, y0, x1, y1] = box, cx = x0 + (x1 - x0) * 0.35, cy = y0 + (y1 - y0) * 0.3, r = Math.max(x1 - x0, y1 - y0);
     c.save();
     c.globalCompositeOperation = 'screen';
-    c.fillStyle = hsla(h, s, l, 0.11 * a); c.fill(p);
+    const g = c.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, hsla(h, s, l + 8, 0.20 * a)); g.addColorStop(0.6, hsla(h, s, l, 0.10 * a)); g.addColorStop(1, hsla(h, s, l - 10, 0.06 * a));
+    c.fillStyle = g; c.fill(p);
     c.save(); c.clip(p);
-    c.lineWidth = 12; c.strokeStyle = hsla(h, s, l, 0.13 * a); c.stroke(p);
-    c.lineWidth = 5; c.strokeStyle = hsla(h, s, l + 8, 0.12 * a); c.stroke(p);
+    c.lineWidth = rim; c.strokeStyle = hsla(h, s, l, 0.14 * a); c.stroke(p);
+    c.lineWidth = rim * 0.4; c.strokeStyle = hsla(h, s, l + 10, 0.12 * a); c.stroke(p);
     c.restore();
-    c.lineWidth = 1.1 * LW; c.strokeStyle = hsla(h, s, l + 10, 0.55 * a); c.stroke(p);
+    c.lineWidth = 1.05 * LW; c.strokeStyle = hsla(h, s, l + 12, 0.55 * a); c.stroke(p);
     c.restore();
   }
+  const bbox = pts => { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); } return [x0, y0, x1, y1]; };
+  function organ(c, pts, h, s, l, a = 1, rim = 12) { const p = closedPath(pts); glass(c, p, bbox(pts), h, s, l, a, rim); return p; }
 
   function tube(pts, w, h, s, l, a) {
     const p = polyPath(makeCurve(pts, false).pts);
@@ -322,9 +368,32 @@
     cc.drawImage(tmp, 0, 0); cc.restore();
   }
 
-  function line(c, pts, w, col) {
-    const p = polyPath(makeCurve(pts, false).pts);
+  function line(c, pts, w, col, smoothIt = true) {
+    const p = polyPath(smoothIt ? makeCurve(pts, false).pts : pts);
     c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = w; c.strokeStyle = col; c.stroke(p);
+  }
+  const both = (c, pts, w, col) => { line(c, pts, w, col); line(c, mirror(pts), w, col); };
+
+  // albero bronchiale frattale (deterministico), ritagliato dentro il polmone
+  function bronchialTree(c, clip, x, y, angles) {
+    c.save(); c.clip(clip); c.lineCap = 'round';
+    const grow = (x, y, a, len, d) => {
+      const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len;
+      c.lineWidth = (0.35 + d * 0.32) * LW; c.strokeStyle = `rgba(215,230,255,${0.05 + d * 0.035})`;
+      c.beginPath(); c.moveTo(x, y); c.lineTo(x2, y2); c.stroke();
+      if (d > 0) { const sp = 0.38 + rnd() * 0.22; grow(x2, y2, a - sp, len * (0.72 + rnd() * 0.1), d - 1); grow(x2, y2, a + sp, len * (0.72 + rnd() * 0.1), d - 1); }
+    };
+    for (const a of angles) grow(x, y, a, 30, 6);
+    c.restore();
+  }
+  function speckle(c, clip, box, n, rgb, amax) {
+    c.save(); c.clip(clip);
+    const [x0, y0, x1, y1] = box;
+    for (let i = 0; i < n; i++) {
+      c.fillStyle = `rgba(${rgb},${0.03 + rnd() * amax})`;
+      c.beginPath(); c.arc(x0 + rnd() * (x1 - x0), y0 + rnd() * (y1 - y0), 0.5 + rnd() * 1.3, 0, TAU); c.fill();
+    }
+    c.restore();
   }
 
   function buildCache() {
@@ -332,73 +401,156 @@
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.fillStyle = '#04060b'; c.fillRect(0, 0, cache.width, cache.height);
     sceneT(c);
-    // alone diffuso dietro il corpo
-    const halo = c.createRadialGradient(300, 430, 20, 300, 430, 520);
+    seed = 11;
+    const halo = c.createRadialGradient(300, 440, 20, 300, 440, 560);
     halo.addColorStop(0, 'rgba(40,70,120,0.22)'); halo.addColorStop(1, 'rgba(4,6,11,0)');
-    c.fillStyle = halo; c.fillRect(BOX.x0 - 400, BOX.y0 - 200, 1600, 1400);
+    c.fillStyle = halo; c.fillRect(BOX.x0 - 500, BOX.y0 - 300, 2000, 1600);
 
     // suolo
-    const gl = -OX / S - 20, gr = (W - OX) / S + 20;
-    const gg = c.createLinearGradient(0, 846, 0, 940);
+    const gl = -OX / S - 20, gr = (W - OX) / S + 20, gy = x => GROUND + Math.sin(x * 0.031) * 2.2 + Math.sin(x * 0.11) * 0.8;
+    const gg = c.createLinearGradient(0, GROUND - 2, 0, GROUND + 110);
     gg.addColorStop(0, 'rgba(120,84,48,0.30)'); gg.addColorStop(1, 'rgba(50,34,20,0.04)');
     c.fillStyle = gg;
-    c.beginPath(); c.moveTo(gl, 940);
-    for (let x = gl; x <= gr; x += 8) c.lineTo(x, 848 + Math.sin(x * 0.031) * 2.2 + Math.sin(x * 0.11) * 0.8);
-    c.lineTo(gr, 940); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(gl, GROUND + 200);
+    for (let x = gl; x <= gr; x += 8) c.lineTo(x, gy(x));
+    c.lineTo(gr, GROUND + 200); c.closePath(); c.fill();
     c.beginPath();
-    for (let x = gl; x <= gr; x += 8) { const y = 848 + Math.sin(x * 0.031) * 2.2 + Math.sin(x * 0.11) * 0.8; x === gl ? c.moveTo(x, y) : c.lineTo(x, y); }
+    for (let x = gl; x <= gr; x += 8) x === gl ? c.moveTo(x, gy(x)) : c.lineTo(x, gy(x));
     c.lineWidth = LW; c.strokeStyle = 'rgba(205,160,105,0.35)'; c.stroke();
-    seed = 11;
-    for (let i = 0; i < 260; i++) {
-      const x = gl + rnd() * (gr - gl), y = 854 + Math.pow(rnd(), 0.8) * 70, r = 0.6 + rnd() * 2.2;
+    for (let i = 0; i < 300; i++) {
+      const x = gl + rnd() * (gr - gl), y = GROUND + 6 + Math.pow(rnd(), 0.8) * 80, r = 0.6 + rnd() * 2.2;
       c.fillStyle = `rgba(${170 + rnd() * 60 | 0},${120 + rnd() * 50 | 0},${70 + rnd() * 40 | 0},${0.06 + rnd() * 0.16})`;
       c.beginPath(); c.ellipse(x, y, r * 1.3, r, rnd() * 3, 0, TAU); c.fill();
     }
 
-    // corpo
-    const body = closedPath(BODY);
-    body.moveTo(350, 90); body.ellipse(300, 90, 50, 62, 0, 0, TAU);
-    const bf = c.createLinearGradient(0, 30, 0, 860);
-    bf.addColorStop(0, 'rgba(110,170,240,0.07)'); bf.addColorStop(0.7, 'rgba(110,170,240,0.05)'); bf.addColorStop(1, 'rgba(110,170,240,0)');
-    c.fillStyle = bf; c.fill(body);
-    c.save(); c.clip(body);
-    const bs = c.createLinearGradient(0, 30, 0, 860);
-    bs.addColorStop(0, 'rgba(130,190,255,0.20)'); bs.addColorStop(0.75, 'rgba(130,190,255,0.14)'); bs.addColorStop(1, 'rgba(130,190,255,0)');
-    c.strokeStyle = bs; c.lineWidth = 16; c.stroke(body); c.lineWidth = 6; c.stroke(body);
-    c.restore();
-    const bl = c.createLinearGradient(0, 30, 0, 860);
-    bl.addColorStop(0, 'rgba(160,205,255,0.60)'); bl.addColorStop(0.72, 'rgba(160,205,255,0.42)'); bl.addColorStop(1, 'rgba(160,205,255,0)');
-    c.strokeStyle = bl; c.lineWidth = 1.2 * LW; c.stroke(body);
+    // corpo: silhouette con dissolvenza sulle cosce
+    const body = closedPath(BODY), bodyEdge = polyPath(makeCurve(BODY, false).pts);
+    const head = closedPath(HEAD);
+    const fade = (a0, a1) => { const g = c.createLinearGradient(0, 20, 0, 880);
+      g.addColorStop(0, `rgba(120,180,245,${a0})`); g.addColorStop(0.78, `rgba(120,180,245,${a1})`); g.addColorStop(1, 'rgba(120,180,245,0)'); return g; };
+    for (const [p, edge] of [[body, bodyEdge], [head, head]]) {
+      c.fillStyle = fade(0.07, 0.05); c.fill(p);
+      c.save(); c.clip(p); c.strokeStyle = fade(0.18, 0.12); c.lineWidth = 18; c.stroke(edge); c.lineWidth = 6; c.stroke(edge); c.restore();
+      c.strokeStyle = fade(0.62, 0.42); c.lineWidth = 1.2 * LW; c.stroke(edge);
+    }
+
+    // volto e muscoli superficiali, appena accennati
+    const skin = 'rgba(160,205,255,0.16)', skinW = 0.9 * LW;
+    both(c, [[262,106],[272,101],[284,101],[293,106]], skinW, 'rgba(160,205,255,0.20)');
+    both(c, [[266,114],[278,110],[290,114],[278,118],[266,114]], skinW, skin);
+    line(c, [[298,112],[296,136],[290,146],[296,151],[300,152],[304,151],[310,146],[304,136],[302,112]], skinW, skin);
+    line(c, [[284,171],[293,168],[300,170],[307,168],[316,171]], skinW, 'rgba(170,210,255,0.22)');
+    line(c, [[288,173],[300,180],[312,173]], skinW, skin);
+    both(c, [[366,124],[372,132],[372,146],[367,152]], skinW, skin);
+    both(c, [[352,176],[340,204],[322,236],[310,258]], skinW, skin);
+    both(c, [[302,296],[322,334],[360,352],[406,350],[446,324],[466,296]], skinW, 'rgba(160,205,255,0.11)');
+    both(c, [[470,280],[490,318],[498,360]], skinW, 'rgba(160,205,255,0.10)');
+    both(c, [[452,640],[420,690],[372,734],[322,758]], skinW, 'rgba(160,205,255,0.12)');
+    line(c, [[300,470],[300,560]], skinW, 'rgba(160,205,255,0.08)');
+    line(c, [[300,590],[300,740]], skinW, 'rgba(160,205,255,0.08)');
+    c.beginPath(); c.ellipse(300, 575, 3, 4.5, 0, 0, TAU); c.lineWidth = skinW; c.strokeStyle = 'rgba(160,205,255,0.22)'; c.stroke();
+
+    // scheletro in trasparenza: clavicole, sterno, coste, bacino, femori
+    const bone = (pts, w, a) => line(c, pts, w * LW, `rgba(235,232,215,${a})`);
+    const bones = (pts, w, a) => { bone(pts, w, a); bone(mirror(pts), w, a); };
+    bones([[312,266],[338,264],[376,271],[416,282],[452,292]], 2.8, 0.15);
+    bone([[300,262],[300,446]], 12, 0.05); bone([[300,446],[300,462]], 4, 0.07);
+    for (let i = 0; i < 10; i++) {
+      const y0 = 270 + i * 17, hw = 94 + 46 * Math.sqrt(i / 9), sw = 8 + i * 3.2;
+      bones([[312, y0], [300 + hw * 0.45, y0 + sw * 0.2 - 3], [300 + hw * 0.84, y0 + sw * 0.7], [300 + hw, y0 + sw + 16], [300 + hw * 0.97, y0 + sw + 36]], 2.6, 0.06);
+    }
+    bones([[300,456],[326,470],[364,492],[404,506],[432,500]], 1.6, 0.10);
+    bones([[290,650],[262,630],[226,604],[196,602],[180,628],[188,668],[210,698],[230,716],[262,740],[294,748]], 1.6, 0.11);
+    bones([[300,640],[322,642],[318,690],[300,712]], 1.4, 0.08);
+    for (const [x, y] of [[214, 716], [386, 716]]) { c.beginPath(); c.arc(x, y, 14, 0, TAU); c.lineWidth = 1.4 * LW; c.strokeStyle = 'rgba(235,232,215,0.09)'; c.stroke(); }
+    bones([[210,728],[200,760],[200,820],[204,870]], 6, 0.035);
 
     // diaframma
-    line(c, [[204,444],[240,422],[288,428],[300,434],[312,428],[360,420],[398,444]], 0.8 * LW, 'rgba(160,200,255,0.18)');
+    line(c, m([[200,444],[236,420],[288,428],[300,434],[312,428],[364,418],[402,446]]), 0.8 * LW, 'rgba(160,200,255,0.18)');
 
-    // organi
-    organ(c, ORGANS.lungR, 350, 70, 70);
-    organ(c, ORGANS.lungL, 350, 70, 70);
-    for (const b of BRONCHIOLES) line(c, b, 1.2 * LW, 'rgba(200,225,255,0.22)');
-    organ(c, ORGANS.liver, 12, 65, 52);
-    organ(c, ORGANS.stomach, 28, 70, 66);
-    organ(c, ORGANS.heart, 356, 80, 60);
+    // organi retroperitoneali e vasi profondi
+    organ(c, ORGANS.kidneyR, 8, 55, 55, 0.7);
+    organ(c, ORGANS.kidneyL, 8, 55, 55, 0.7);
+    line(c, [[250,566],[264,630],[280,700],[290,712]], 0.9 * LW, 'rgba(240,200,190,0.18)');
+    line(c, [[350,556],[336,630],[320,700],[310,712]], 0.9 * LW, 'rgba(240,200,190,0.18)');
+    tube(TUBES.aorta, 7, 0, 75, 58, 0.45);
+    tube(TUBES.iliacR, 5, 0, 75, 58, 0.4);
+    tube(TUBES.iliacL, 5, 0, 75, 58, 0.4);
+    tube(TUBES.ivc, 8, 220, 70, 62, 0.5);
+    tube(TUBES.svc, 7, 220, 70, 62, 0.45);
+    tube(TUBES.brachioR, 5, 220, 70, 62, 0.35);
+    tube(TUBES.brachioL, 5, 220, 70, 62, 0.35);
+    { const pc = makeCurve(TUBES.pancreas, false); const r = ribbon(pc, (s, L) => 17 - 9 * (s / L) + 1.5 * Math.sin(s * 0.4));
+      glass(c, r.path, bbox(TUBES.pancreas), 45, 60, 68, 0.6, 6); }
+    organ(c, ORGANS.spleen, 330, 45, 50, 0.9);
+
+    // fegato e colecisti
+    const liver = organ(c, ORGANS.liver, 10, 62, 46, 1.1, 16);
+    speckle(c, liver, bbox(ORGANS.liver), 260, '230,140,110', 0.08);
+    line(c, m([[304,428],[300,446],[302,470]]), 0.9 * LW, 'rgba(255,190,170,0.25)');
+    organ(c, ORGANS.gall, 95, 45, 52, 0.9, 5);
+    tube(TUBES.hepatic, 4.5, 220, 70, 66, 0.5);
+    tube(TUBES.portal, 6, 225, 70, 66, 0.6);
+
+    // stomaco con pliche
+    const stom = organ(c, ORGANS.stomach, 24, 70, 64, 1, 14);
+    c.save(); c.clip(stom);
+    for (const k of [0, 1, 2, 3]) line(c, m([[384 - k * 6, 416 + k * 5], [398 - k * 7, 440], [401 - k * 8, 470], [393 - k * 7, 500], [372 - k * 5, 518 - k * 3], [344, 524 - k * 4]]).map(([x, y], i) => [x + Math.sin(i * 2 + k) * 2, y]), 0.8 * LW, 'rgba(255,200,170,0.13)');
+    c.restore();
+
+    // polmoni: lobi, scissure, albero bronchiale, alveoli
+    const lungR = organ(c, ORGANS.lungR, 350, 65, 70, 1, 16);
+    const lungL = organ(c, ORGANS.lungL, 350, 65, 70, 1, 16);
+    const hilR = m([[284, 310]])[0], hilL = m([[318, 310]])[0];
+    bronchialTree(c, lungR, hilR[0], hilR[1], [-2.0, -2.6, 2.9, 2.3, 1.85]);
+    bronchialTree(c, lungL, hilL[0], hilL[1], [-1.15, -0.55, 0.25, 0.85, 1.3]);
+    speckle(c, lungR, bbox(ORGANS.lungR), 380, '255,190,200', 0.07);
+    speckle(c, lungL, bbox(ORGANS.lungL), 380, '255,190,200', 0.07);
+    for (const f of FISSURES) line(c, f, 0.9 * LW, 'rgba(255,200,210,0.30)');
     for (const [x, y] of ALVEOLI) { c.beginPath(); c.arc(x, y, 3.6, 0, TAU); c.lineWidth = 0.8 * LW; c.strokeStyle = 'rgba(255,190,200,0.35)'; c.stroke(); }
 
-    tube(TUBES.ivc, 7, 220, 70, 62, 0.55);
-    tube(TUBES.portal, 5.5, 225, 70, 66, 0.6);
-    tube(TUBES.hepatic, 4, 220, 70, 66, 0.5);
-    tube(TUBES.pulmTrunk, 6, 265, 60, 70, 0.6);
-    tube(TUBES.pulmL, 5, 265, 60, 70, 0.5);
-    tube(TUBES.trachea, 11, 195, 50, 78, 0.7);
-    tube(TUBES.bronchR, 6.5, 195, 50, 78, 0.6);
-    tube(TUBES.bronchL, 6.5, 195, 50, 78, 0.6);
-    tube(TUBES.esophagus, 13, 10, 55, 70, 0.6);
-    tube(TUBES.colon, 21, 36, 45, 62, 0.62);
-    tube(TUBES.appendix, 4, 36, 45, 62, 0.5);
-    tube(TUBES.duodenum, 12, 340, 55, 74, 0.6);
-    tube(TUBES.coil, 13, 340, 55, 74, 0.7);
+    // cuore con solchi coronarici
+    organ(c, ORGANS.heart, 354, 78, 56, 1.1, 14);
+    for (const s of [m([[300,330],[316,346],[334,354],[350,362]]), m([[330,340],[328,372],[338,398],[350,402]]), m([[290,330],[296,362],[302,392],[312,414]])])
+      line(c, s, 1.1 * LW, 'rgba(255,190,150,0.30)');
+    tube(TUBES.pulmTrunk, 6.5, 265, 60, 70, 0.6);
+    tube(TUBES.pulmL, 5.5, 265, 60, 70, 0.5);
 
-    // anelli tracheali
+    // vie aeree ed esofago
+    tube(TUBES.trachea, 12, 195, 50, 78, 0.7);
+    tube(TUBES.bronchR, 7, 195, 50, 78, 0.6);
+    tube(TUBES.bronchL, 7, 195, 50, 78, 0.6);
+    tube(TUBES.esophagus, 14, 10, 55, 70, 0.6);
     sceneT(c);
-    for (let y = 176; y < 286; y += 8) { c.beginPath(); c.moveTo(291, y); c.quadraticCurveTo(296, y + 2, 301, y); c.lineWidth = 0.7 * LW; c.strokeStyle = 'rgba(200,235,255,0.28)'; c.stroke(); }
+    for (let y = 214; y < 256; y += 6.5) { c.beginPath(); c.moveTo(290, y); c.quadraticCurveTo(295, y + 2, 300, y); c.lineWidth = 0.7 * LW; c.strokeStyle = 'rgba(200,235,255,0.30)'; c.stroke(); }
+    c.beginPath(); c.ellipse(295, 210, 9, 5, 0, 0, TAU); c.lineWidth = 0.9 * LW; c.strokeStyle = 'rgba(200,235,255,0.22)'; c.stroke();
+
+    // colon con austrature
+    { const cc2 = makeCurve(TUBES.colon, false), per = 15;
+      const r = ribbon(cc2, (s, L) => (s > L - 40 ? 15 : 22) * (0.86 + 0.14 * Math.abs(Math.sin(Math.PI * s / per))));
+      glass(c, r.path, bbox(TUBES.colon), 34, 45, 60, 0.95, 8);
+      c.save(); c.clip(r.path);
+      for (let s = per; s < cc2.len - 44; s += per) {
+        const k = idxAt(cc2, s), a = r.L[k], b = r.R[k];
+        c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]);
+        c.lineWidth = 0.9 * LW; c.strokeStyle = 'rgba(255,220,170,0.22)'; c.stroke();
+      }
+      c.restore();
+      const ap = makeCurve(TUBES.appendix, false); glass(c, ribbon(ap, (s, L) => 5 - 2 * s / L).path, bbox(TUBES.appendix), 34, 45, 60, 0.9, 3);
+    }
+    // duodeno e anse del tenue
+    { const d = makeCurve(TUBES.duodenum, false); glass(c, ribbon(d, () => 11).path, bbox(TUBES.duodenum), 340, 50, 72, 0.9, 5); }
+    { const r = ribbon(coil, s => 12 + 1.2 * Math.sin(s * 0.21));
+      glass(c, r.path, bbox(TUBES.coil), 345, 50, 74, 1, 6);
+      c.save(); c.clip(r.path);
+      for (let s = 6; s < coil.len; s += 6.5) {
+        const k = idxAt(coil, s), a = r.L[k], b = r.R[k];
+        c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]);
+        c.lineWidth = 0.5 * LW; c.strokeStyle = 'rgba(255,215,225,0.10)'; c.stroke();
+      }
+      c.restore();
+    }
+    organ(c, ORGANS.bladder, 50, 60, 70, 0.6, 6);
 
     // guida del percorso (sempre visibile, ininterrotta)
     c.save();
@@ -415,7 +567,7 @@
     for (const [txt, x, y, al] of LABELS) {
       c.textAlign = al;
       c.fillStyle = 'rgba(200,215,240,0.46)';
-      c.fillText(txt, x, y);
+      txt.split('\n').forEach((ln, i) => c.fillText(ln, x, y + i * fs * 1.25));
     }
   }
   const routePath = (() => { const p = polyPath(route.pts); p.closePath(); return p; })();
@@ -519,9 +671,9 @@
     // battito cardiaco
     const beat = Math.pow(Math.max(0, Math.sin(clock * 7.2)), 6);
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
-    const hg = ctx.createRadialGradient(312, 372, 2, 312, 372, 44);
+    const hg = ctx.createRadialGradient(HEART_C[0], HEART_C[1], 2, HEART_C[0], HEART_C[1], 48);
     hg.addColorStop(0, `rgba(255,80,90,${0.06 + 0.12 * beat})`); hg.addColorStop(1, 'rgba(255,80,90,0)');
-    ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(312, 372, 44, 0, TAU); ctx.fill();
+    ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(HEART_C[0], HEART_C[1], 48, 0, TAU); ctx.fill();
     // alveoli attivi
     const alvA = st.k === 'lungs' ? smooth(u * 3) : st.k === 'ascent' ? 1 - smooth(u * 2) : 0;
     if (alvA > 0) for (const [x, y] of ALVEOLI) {
