@@ -308,7 +308,13 @@ const male = makeWorm(0.21, 0.0021, true, 1.7);
 // ---------------- Anatomia ----------------
 let ready = false;
 const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
-loader.load('models/anatomy-ascaris.glb', gltf => {
+fetch('models/anatomy-ascaris.glb.b64.txt').then(r => { if (!r.ok) throw new Error(r.status); return r.text(); }).then(b64 => {
+  const bin = atob(b64.trim()), buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  loader.parse(buf.buffer, '', onModel, onErr);
+}).catch(onErr);
+function onErr(err) { $('loading').textContent = 'Impossibile caricare il modello anatomico.'; console.error(err); }
+function onModel(gltf) {
   gltf.scene.traverse(o => {
     if (!o.isMesh) return;
     const a = ASSIGN[o.name] || ASSIGN[o.parent?.name];
@@ -317,7 +323,7 @@ loader.load('models/anatomy-ascaris.glb', gltf => {
   });
   scene.add(gltf.scene);
   ready = true; $('loading').hidden = true; window.__ready = true;
-}, undefined, err => { $('loading').textContent = 'Impossibile caricare il modello anatomico.'; console.error(err); });
+}
 
 // ---------------- Camera ----------------
 const camAt = new THREE.Vector3(), camPos = new THREE.Vector3(), tmpV = new THREE.Vector3();
