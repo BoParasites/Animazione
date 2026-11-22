@@ -19,25 +19,25 @@ const CAPTURE = params.has('capture');
 // ---------------- Fasi ----------------
 const STAGES = [
   { k: 'ingest', title: 'Ingestione', time: 'giorno 0', dur: 6, glyph: 'eggE',
-    text: 'Le uova embrionate, che contengono la larva infettante, vengono ingerite con cibo, acqua o mani sporche di terra.' },
-  { k: 'hatch', title: 'Schiusa nel tenue', time: 'duodeno', dur: 4, glyph: 'hatch',
-    text: 'Nell’intestino tenue le larve escono dall’uovo e attraversano la parete intestinale.' },
-  { k: 'liver', title: 'Vena porta e fegato', time: '', dur: 5, glyph: 'larva',
-    text: 'Entrano nel sangue venoso: vene mesenteriche, vena porta, fegato, poi vena cava inferiore.' },
+    text: 'Le uova embrionate contengono la larva infettante (L3). Si ingeriscono con cibo, acqua o mani contaminate da terra.' },
+  { k: 'hatch', title: 'Schiusa nel tenue', time: 'prime ore', dur: 4, glyph: 'hatch',
+    text: 'Nell’intestino tenue le larve L3 escono dall’uovo e attraversano la parete intestinale.' },
+  { k: 'liver', title: 'Vena porta e fegato', time: '≈ 3° giorno', dur: 5, glyph: 'larva',
+    text: 'Per via venosa, attraverso la vena porta, arrivano al fegato, dove crescono. Poi passano nella vena cava inferiore.' },
   { k: 'heart', title: 'Cuore destro', time: '', dur: 4, glyph: 'larva',
-    text: 'Dalla vena cava inferiore passano nell’atrio e nel ventricolo destro, poi nell’arteria polmonare.' },
-  { k: 'lungs', title: 'Polmoni', time: '10–14 giorni', dur: 7, ease: 'arrive', glyph: 'larva',
-    text: 'Nei polmoni le larve maturano per 10–14 giorni, poi perforano la parete alveolare. In questa fase possono comparire tosse ed eosinofilia (sindrome di Löffler).' },
+    text: 'Dalla vena cava inferiore entrano nell’atrio e nel ventricolo destro, poi nell’arteria polmonare.' },
+  { k: 'lungs', title: 'Polmoni', time: '≈ 7° giorno', dur: 7, ease: 'arrive', glyph: 'larva',
+    text: 'Nei polmoni le larve crescono e attraversano la parete degli alveoli. Il passaggio può dare tosse ed eosinofilia (sindrome di Löffler).' },
   { k: 'ascent', title: 'Risalita', time: '', dur: 5, glyph: 'larva',
     text: 'Risalgono bronchioli, bronchi e trachea fino alla faringe.' },
-  { k: 'swallow', title: 'Deglutizione', time: '', dur: 6, glyph: 'larva',
-    text: 'Vengono deglutite: secondo passaggio per esofago e stomaco, di nuovo fino all’intestino tenue.' },
-  { k: 'adult', title: 'Vermi adulti', time: '2–3 mesi', dur: 9, glyph: 'grow',
-    text: 'Nel digiuno diventano adulti: femmine 20–35 cm, maschi 15–30 cm con coda ricurva (qui in scala reale). Dall’ingestione alla deposizione delle uova passano 2–3 mesi; gli adulti vivono 1–2 anni.' },
-  { k: 'eggs', title: 'Uova nelle feci', time: '≈200.000/giorno', dur: 7, glyph: 'eggs',
-    text: 'Una femmina può deporre circa 200.000 uova al giorno. Attraversano il colon ed escono con le feci, non ancora embrionate e quindi non infettanti.' },
-  { k: 'soil', title: 'Embrionazione nel suolo', time: '18 gg – settimane', dur: 7, ease: 'arrive', glyph: 'eggSoil',
-    text: 'In un terreno caldo, umido e ombreggiato l’uovo fecondato sviluppa la larva infettante in 18 giorni o alcune settimane. Le uova non fecondate (quella allungata) non diventano infettanti.' },
+  { k: 'swallow', title: 'Deglutizione', time: '≈ 10° giorno', dur: 6, glyph: 'larva',
+    text: 'Vengono deglutite: secondo passaggio per esofago e stomaco, fino all’intestino tenue.' },
+  { k: 'adult', title: 'Vermi adulti', time: 'uova dopo 67–76 gg', dur: 9, glyph: 'grow',
+    text: 'Nel tenue mutano in L4 e L5 e diventano adulti a sessi separati: la femmina arriva a 35 cm, il maschio è più piccolo e ha la coda ricurva (qui in scala reale). Le prime uova compaiono 67–76 giorni dopo l’ingestione.' },
+  { k: 'eggs', title: 'Uova nelle feci', time: 'fino a 200.000/giorno', dur: 7, glyph: 'eggs',
+    text: 'Una femmina può deporre fino a 200.000 uova al giorno. Escono con le feci non ancora embrionate, quindi non infettanti.' },
+  { k: 'soil', title: 'Embrionazione nel suolo', time: '2–6 settimane', dur: 7, ease: 'arrive', glyph: 'eggSoil',
+    text: 'Nel terreno umido e ombreggiato, dentro l’uovo fecondato si forma la larva, che compie due mute fino allo stadio infettante L3. Servono settimane, secondo temperatura e umidità. Le uova non fecondate (quella allungata) non si sviluppano.' },
   { k: 'contagion', title: 'Contagio', time: '', dur: 6, glyph: 'eggE',
     text: 'Terra, verdure crude, acqua e mani contaminate riportano le uova embrionate alla bocca. Il ciclo ricomincia.' },
 ];
@@ -482,6 +482,15 @@ function frame(now) {
 // esportazione video: renderAt(secondi) disegna un fotogramma deterministico
 window.renderAt = sec => { paused = true; last = null; t = ((sec % T) + T) % T; clock = sec; ghostA = sec >= T && t < 2.5 ? 1 - t / 2.5 : 0; render(); };
 window.CYCLE_SECONDS = T;
+window.STAGES = STAGES.map(({ k, title, time, text }) => ({ k, title, time, text }));
+window.stateAt = (sec, aspect = 16 / 9) => {
+  camera.aspect = aspect; camera.clearViewOffset(); camera.updateProjectionMatrix();
+  const tt = ((sec % T) + T) % T, L = locate(tt); updateCamera(tt);
+  return { stage: L.i, u: L.u, frac: L.s / LEN, cam: camera.position.toArray(), at: camAt.toArray() };
+};
+window.routeSamples = n => curve.getSpacedPoints(n).map(p => p.toArray());
+window.soilEggData = () => soilEggs.map(e => ({ p: e.position.toArray(), s: e.userData.s / LEN, fertile: e.userData.fertile }));
+window.stageBounds = () => STAGES.map(st => [st.s0 / LEN, st.s1 / LEN, st.t0, st.dur]);
 window.__dbg = { female, male, lit, ghost, guide, sparks, scene, camera };
 addEventListener('resize', layout);
 wideMQ.addEventListener?.('change', layout);
