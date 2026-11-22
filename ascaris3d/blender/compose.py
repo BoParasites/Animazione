@@ -8,7 +8,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--state'); ap.add_argument('--anat'); ap.add_argument('--over'); ap.add_argument('--out')
 ap.add_argument('--fonts', default=os.path.join(os.path.dirname(__file__), 'fonts'))
 ap.add_argument('--frames', default='0:1980:1'); ap.add_argument('--anat-name', default='b_{:05d}.png')
-ap.add_argument('--outro', action='store_true')
+ap.add_argument('--outro', action='store_true'); ap.add_argument('--anat-offset', type=int, default=0)
 A = ap.parse_args()
 S = json.load(open(A.state)); FR, ST = S['frames'], S['stages']
 W, H, FPS = 1920, 1080, 30
@@ -29,7 +29,7 @@ def clean(s): return s.replace('≈ ', '').replace('≈', '').replace('’', "'"
 TIMES = {'liver': '3° giorno circa', 'lungs': '7° giorno circa', 'swallow': '10° giorno circa'}
 
 def anat_frame(i):
-    p = os.path.join(A.anat, A.anat_name.format(i))
+    p = os.path.join(A.anat, A.anat_name.format(i + A.anat_offset))
     if not os.path.exists(p):  # prove: usa il fotogramma più vicino disponibile
         for d in range(1, 60):
             for j in (i - d, i + d):
@@ -102,7 +102,8 @@ def intro(img_rgba, i):
 
 def frame(i):
     base = anat_frame(i)
-    ov = np.asarray(Image.open(os.path.join(A.over, f'b_{i:05d}.png')).convert('RGBA')).astype(np.float32) / 255
+    ovi = Image.open(os.path.join(A.over, f'b_{i:05d}.png')).convert('RGBA')
+    ov = np.asarray(ovi.filter(ImageFilter.MedianFilter(3))).astype(np.float32) / 255  # il livello è senza denoiser
     a = ov[..., 3:4]; rgb = ov[..., :3]
     out = base * (1 - a) + rgb * a
     lum = np.clip((rgb.min(axis=2, keepdims=True) - 0.80) / 0.2, 0, 1) * a  # solo le parti emissive (quasi bianche)
