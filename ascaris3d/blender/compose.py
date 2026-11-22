@@ -114,7 +114,7 @@ def frame(i):
     out = out / (1 + 0.08 * out)  # compressione morbida delle alte luci
     out = out * vignette()
     img = caption(out, i)
-    return intro(img, i)
+    return img  # titolo iniziale rimosso su richiesta
 
 def outro(last):
     """5 s finali: ultimo fotogramma attenuato e crediti."""

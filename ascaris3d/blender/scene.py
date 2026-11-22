@@ -9,6 +9,7 @@ ap.add_argument('--frames', default='0:1980:1'); ap.add_argument('--samples', ty
 ap.add_argument('--res', default='1920x1080'); ap.add_argument('--threads', type=int, default=0)
 ap.add_argument('--blend', default='')
 ap.add_argument('--layer', default='anat', choices=['anat', 'over', 'all'])
+ap.add_argument('--liver-only', action='store_true')
 A = ap.parse_args()
 S = json.load(open(A.state))
 FR, ST, ROUTE, SOIL = S['frames'], S['stages'], S['route'], S['soil']
@@ -123,11 +124,49 @@ def make_curve(name, pts, radius, mat, cyclic=False, res=2):
     return ob, sp
 
 RP = [V3(p) for p in ROUTE]
-ROUTE_MAT = emissive('route', (1.0, 0.62, 0.2), 30.0)
+def trail_mat(name, col, peak):
+    """Scia: emissione che cresce dalla coda (Ut) alla testa (Uh) lungo la coordinata U della curva;
+    con Rv > 0 l'intero tratto si riaccende (riepilogo finale)."""
+    m, nt, out = node_mat(name)
+    uv = nt.nodes.new('ShaderNodeUVMap'); sx = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(uv.outputs['UV'], sx.inputs[0])
+    vals = {}
+    for k, v in (('Uh', 0.0), ('Ut', 0.0), ('Rv', 0.0)):
+        n = nt.nodes.new('ShaderNodeValue'); n.name = k; n.outputs[0].default_value = v; vals[k] = n
+    sub = nt.nodes.new('ShaderNodeMath'); sub.operation = 'SUBTRACT'
+    nt.links.new(sx.outputs['X'], sub.inputs[0]); nt.links.new(vals['Ut'].outputs[0], sub.inputs[1])
+    span = nt.nodes.new('ShaderNodeMath'); span.operation = 'SUBTRACT'
+    nt.links.new(vals['Uh'].outputs[0], span.inputs[0]); nt.links.new(vals['Ut'].outputs[0], span.inputs[1])
+    span2 = nt.nodes.new('ShaderNodeMath'); span2.operation = 'MAXIMUM'; span2.inputs[1].default_value = 1e-6
+    nt.links.new(span.outputs[0], span2.inputs[0])
+    div = nt.nodes.new('ShaderNodeMath'); div.operation = 'DIVIDE'; div.use_clamp = True
+    nt.links.new(sub.outputs[0], div.inputs[0]); nt.links.new(span2.outputs[0], div.inputs[1])
+    pw = nt.nodes.new('ShaderNodeMath'); pw.operation = 'POWER'; pw.inputs[1].default_value = 1.8
+    nt.links.new(div.outputs[0], pw.inputs[0])
+    rv = nt.nodes.new('ShaderNodeMath'); rv.operation = 'MULTIPLY'; rv.inputs[1].default_value = 0.4
+    nt.links.new(vals['Rv'].outputs[0], rv.inputs[0])
+    mx = nt.nodes.new('ShaderNodeMath'); mx.operation = 'MAXIMUM'
+    nt.links.new(pw.outputs[0], mx.inputs[0]); nt.links.new(rv.outputs[0], mx.inputs[1])
+    st = nt.nodes.new('ShaderNodeMath'); st.operation = 'MULTIPLY'; st.inputs[1].default_value = peak
+    nt.links.new(mx.outputs[0], st.inputs[0])
+    e = nt.nodes.new('ShaderNodeEmission'); e.inputs['Color'].default_value = (*col, 1)
+    nt.links.new(st.outputs[0], e.inputs['Strength'])
+    # la coda sfuma anche in opacità
+    t = nt.nodes.new('ShaderNodeBsdfTransparent'); mix = nt.nodes.new('ShaderNodeMixShader')
+    a = nt.nodes.new('ShaderNodeMath'); a.operation = 'SQRT'; a.use_clamp = True
+    nt.links.new(mx.outputs[0], a.inputs[0]); nt.links.new(a.outputs[0], mix.inputs['Fac'])
+    nt.links.new(t.outputs[0], mix.inputs[1]); nt.links.new(e.outputs[0], mix.inputs[2])
+    nt.links.new(mix.outputs[0], out.inputs['Surface'])
+    return m, vals
+
+ROUTE_MAT, ROUTE_VAL = trail_mat('route', (1.0, 0.62, 0.2), 30.0)
 route_ob, _ = make_curve('route', RP, 0.0012, ROUTE_MAT)
+route_ob.data.bevel_factor_mapping_start = 'SPLINE'
 route_ob.data.bevel_factor_mapping_end = 'SPLINE'
 route_ob.visible_shadow = False
-guide_ob, _ = make_curve('guide', RP, 0.0005, emissive('guide', (1.0, 0.7, 0.35), 1.2, alpha=0.35))
+# traccia tenue del percorso già fatto (sotto la soglia del bagliore)
+guide_ob, _ = make_curve('guide', RP, 0.0007, emissive('guide', (1.0, 0.66, 0.30), 3.5, alpha=0.75))
+guide_ob.data.bevel_factor_mapping_end = 'SPLINE'
 guide_ob.visible_shadow = False
 
 # lunghezze cumulative del percorso per interpolare la testa
@@ -141,6 +180,31 @@ def route_at(frac):
     seg = CUM[i + 1] - CUM[i]; f = (s - CUM[i]) / seg if seg > 0 else 0
     p = RP[i].lerp(RP[i + 1], f); t = (RP[i + 1] - RP[i]).normalized()
     return p, t
+
+NPT = len(RP) - 1
+def uidx(frac):
+    """frazione di lunghezza -> frazione di indice dei punti (bevel 'SPLINE' e UV della curva)"""
+    s = max(0.0, min(1.0, frac)) * LEN
+    i = max(0, min(NPT - 1, bisect.bisect_right(CUM, s) - 1))
+    seg = CUM[i + 1] - CUM[i]; f = (s - CUM[i]) / seg if seg > 0 else 0
+    return (i + f) / NPT
+
+# fegato attenuato quando la testa è nello stomaco
+from mathutils.bvhtree import BVHTree
+_dg = bpy.context.evaluated_depsgraph_get()
+_st = [o for o in bpy.data.objects if o.type == 'MESH' and o.name.split('.')[0] == 'stomach'][0]
+_me = _st.evaluated_get(_dg).to_mesh()
+STOM = BVHTree.FromPolygons([_st.matrix_world @ v.co for v in _me.vertices], [tuple(p.vertices) for p in _me.polygons])
+_raw = []
+for _fr in FR:
+    _p, _ = route_at(_fr['frac'])
+    _c = STOM.find_nearest(_p)
+    _raw.append(1.0 if (_c[0] is not None and _c[3] < 0.012) else 0.0)
+LIVER_FADE = []
+for _i in range(len(_raw)):
+    _w = _raw[max(0, _i - 20):_i + 21]
+    LIVER_FADE.append(smooth(sum(_w) / len(_w) * 1.6))
+print('liver fade frames:', sum(1 for v in LIVER_FADE if v > 0.01), flush=True)
 
 # testa luminosa: piccola sfera emissiva + luce che illumina i tessuti dall'interno
 head = bpy.data.objects.new('headlight', bpy.data.lights.new('headlight', 'POINT'))
@@ -324,7 +388,21 @@ def set_frame(i):
     cp, at = V3(fr['cam']), V3(fr['at'])
     cam.location = cp; cam.rotation_mode = 'QUATERNION'; cam.rotation_quaternion = (at - cp).to_track_quat('-Z', 'Y')
     cam.data.dof.focus_distance = (at - cp).length
-    route_ob.data.bevel_factor_end = max(0.0005, frac)
+    uh = uidx(frac)
+    ut = uidx(FR[max(0, i - 75)]['frac']) if i >= 75 else 0.0  # scia: strada percorsa negli ultimi 2,5 s
+    if ut > uh: ut = 0.0
+    rv = smooth((i - 1890) / 36.0)  # riepilogo: l'intero percorso si riaccende alla fine
+    route_ob.data.bevel_factor_start = ut * (1 - rv)
+    route_ob.data.bevel_factor_end = max(0.0005, uh)
+    guide_ob.data.bevel_factor_end = max(0.0005, uh)
+    ROUTE_VAL['Uh'].outputs[0].default_value = uh
+    ROUTE_VAL['Ut'].outputs[0].default_value = ut
+    ROUTE_VAL['Rv'].outputs[0].default_value = rv
+    lf = LIVER_FADE[i]
+    for mn, a0, a1 in (('liver', 0.55, 0.90), ('gall', 0.6, 0.9)):
+        mr = [n for n in M[mn].node_tree.nodes if n.type == 'MAP_RANGE'][0]
+        mr.inputs['To Min'].default_value = a0 * (1 - 0.8 * lf)
+        mr.inputs['To Max'].default_value = a1 * (1 - 0.55 * lf)
     p, t = route_at(frac)
     head.location = p; head_orb.location = p
     # glifi
@@ -388,6 +466,7 @@ import time
 for i in range(a, b_, st):
     path = os.path.join(A.out, f'b_{i:05d}.png')
     if os.path.exists(path): continue
+    if A.liver_only and LIVER_FADE[i] <= 0.005: continue
     t0 = time.time(); set_frame(i)
     r.filepath = path; bpy.ops.render.render(write_still=True)
     print(f'frame {i} {time.time() - t0:.1f}s', flush=True)
