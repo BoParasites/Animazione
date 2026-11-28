@@ -570,11 +570,12 @@ function densify(ctrl, per) {
 }
 // ventosa ventrale del maschio: disco su breve peduncolo, bordo spesso, pieghe radiali verso il centro
 const ventralGeo = makeLathe(densify([
-  [0.001, -0.07, 0], [0.1, -0.065, 0], [0.104, 0.0, 0], [0.112, 0.05, 0], [0.14, 0.085, 0], [0.172, 0.115, 0],
-  [0.188, 0.145, 1], [0.184, 0.172, 1], [0.168, 0.19, 1], [0.142, 0.193, 1], [0.12, 0.185, 2], [0.1, 0.168, 2],
-  [0.075, 0.15, 2], [0.05, 0.138, 2], [0.025, 0.131, 2], [0.001, 0.129, 2]], 3), 80,
+  [0.001, -0.07, 0], [0.092, -0.065, 0], [0.096, 0.0, 0], [0.1, 0.045, 0], [0.115, 0.078, 0], [0.14, 0.1, 0],
+  [0.165, 0.115, 1], [0.182, 0.138, 1], [0.188, 0.163, 1], [0.18, 0.188, 1], [0.162, 0.204, 1], [0.138, 0.208, 1],
+  [0.116, 0.198, 1], [0.103, 0.18, 2], [0.09, 0.158, 2], [0.07, 0.14, 2], [0.045, 0.128, 2], [0.022, 0.122, 2],
+  [0.001, 0.12, 2]], 3), 80,
   (i, th, r, y, kind) => kind === 1 ? [0.0022 * Math.sin(th * 7 + 0.6) + 0.0012 * Math.sin(th * 31), 0.0015 * Math.sin(th * 7 + 0.6)]
-                      : kind === 2 ? [0, 0.009 * Math.sin(th * 11) * smooth(0.0, 0.05, r) * smooth(0.13, 0.08, r)] : [0, 0]);
+                      : kind === 2 ? [0, 0.008 * Math.sin(th * 11) * smooth(0.0, 0.05, r) * smooth(0.12, 0.08, r)] : [0, 0]);
 const ventral = new THREE.Mesh(ventralGeo, suckerMat);
 ventral.castShadow = ventral.receiveShadow = true; scene.add(ventral);
 
@@ -761,6 +762,13 @@ function autoCamera(t) {
   const el = num('el', 0.2 + 0.06 * Math.sin(TAU * t / 33 + 1.0));
   camera.position.set(DIST * Math.sin(az) * Math.cos(el), DIST * Math.sin(el), DIST * Math.cos(az) * Math.cos(el));
   if (params.has('fm')) { const f = spineAt(num('fm', 0)); camera.position.add(f.P); camera.lookAt(f.P); }
+  else if (params.has('fo')) {     // guarda dentro la ventosa orale del maschio, lungo il suo asse
+    const f = spineAt(M_OS);
+    const D = f.T.clone().multiplyScalar(-Math.cos(0.5)).addScaledVector(f.N, -Math.sin(0.5));
+    const c = f.P.clone().addScaledVector(f.N, FORE_Y).addScaledVector(D, 0.12);
+    camera.position.copy(c).addScaledVector(D, DIST).addScaledVector(f.N, DIST * num('fon', 0.35)).addScaledVector(f.B, DIST * num('fob', 0.2));
+    camera.lookAt(c);
+  }
   else if (params.has('ff')) {
     const i = Math.max(0, fSig.findIndex(x => x >= num('ff', 0)));
     const c = new THREE.Vector3(fc[i * 3], fc[i * 3 + 1], fc[i * 3 + 2]);
