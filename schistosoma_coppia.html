@@ -152,6 +152,16 @@ function makeTubercleTexture() {
   tex.colorSpace = THREE.NoColorSpace;
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  // mappa colore: tegumento arancio-salmone, apici dei tubercoli più chiari (color crema)
+  const c2 = document.createElement('canvas'); c2.width = TW; c2.height = TH;
+  const g2 = c2.getContext('2d');
+  g2.fillStyle = 'rgb(216,182,164)'; g2.fillRect(0, 0, TW, TH);
+  g2.globalCompositeOperation = 'screen'; g2.globalAlpha = 0.9; g2.drawImage(c, 0, 0);
+  const col = new THREE.CanvasTexture(c2);
+  col.colorSpace = THREE.SRGBColorSpace;
+  col.wrapS = col.wrapT = THREE.ClampToEdgeWrapping;
+  col.anisotropy = tex.anisotropy;
+  tex.userData.colorMap = col;
   return tex;
 }
 
@@ -160,11 +170,11 @@ const tubTex = makeTubercleTexture();
 const maleMat = new THREE.MeshPhysicalMaterial({
   vertexColors: true, roughness: 0.44, metalness: 0,
   clearcoat: 0.7, clearcoatRoughness: 0.14,
-  sheen: 0.7, sheenRoughness: 0.55, sheenColor: new THREE.Color(0xffe2c4),
-  bumpMap: tubTex, bumpScale: parseFloat(params.get('bump') || '2.2'),
+  sheen: 0.7, sheenRoughness: 0.55, sheenColor: new THREE.Color(0xffc9a0),
+  map: tubTex.userData.colorMap, bumpMap: tubTex, bumpScale: parseFloat(params.get('bump') || '2.2'),
 });
 const suckerMat = new THREE.MeshPhysicalMaterial({
-  color: new THREE.Color().setRGB(srgb2lin(232), srgb2lin(208), srgb2lin(192)),
+  color: new THREE.Color().setRGB(srgb2lin(214), srgb2lin(156), srgb2lin(120)),
   roughness: 0.38, clearcoat: 0.75, clearcoatRoughness: 0.14,
   sheen: 0.6, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffd8c0),
 });
@@ -260,7 +270,7 @@ const mPos = new Float32Array(MR * K1 * 3), mUV = new Float32Array(MR * K1 * 2),
     idx.push(a, b, c, b, d, c);
   }
   maleGeo.setIndex(idx);
-  const base = [srgb2lin(236), srgb2lin(224), srgb2lin(204)];
+  const base = [srgb2lin(244), srgb2lin(200), srgb2lin(166)];
   for (let i = 0; i < MR; i++) {
     const m = warp(i / (MR - 1), 0.7), can = smooth(0.075, 0.16, m);
     const tone = 0.96 + 0.05 * vnoise(m * 40);
@@ -373,15 +383,15 @@ const fPos = new Float32Array(FR * FK * 3), fCol = new Float32Array(FR * FK * 3)
     idx.push(a, c, b, b, c, d);
   }
   femaleGeo.setIndex(idx);
-  const pale = [srgb2lin(214), srgb2lin(200), srgb2lin(182)];
-  const dark = [srgb2lin(44), srgb2lin(32), srgb2lin(26)];
+  const pale = [srgb2lin(216), srgb2lin(202), srgb2lin(184)];
+  const dark = [srgb2lin(190), srgb2lin(170), srgb2lin(148)];
   for (let i = 0; i < FR; i++) {
     const sg = warp(i / (FR - 1)) * L_F;               // mm dall'estremità anteriore
     for (let j = 0; j < FK; j++) {
       const th = j / FS * TAU;
       // parte anteriore chiara; dalla metà anteriore in poi vitellaria e intestino pigmentato scuriscono il corpo
       const mott = 0.6 * vnoise(sg * 9 + 13 * Math.cos(th) + 50) + 0.4 * vnoise(sg * 23 + 7 * Math.sin(th) + 300);
-      const d = clamp(smooth(2.4, 4.3, sg) * (0.78 + 0.32 * mott), 0, 1);
+      const d = clamp((0.25 + 0.5 * smooth(2.4, 6, sg)) * (0.5 + 0.7 * mott), 0, 1);
       const p = (i * FK + j) * 3;
       for (let c = 0; c < 3; c++) fBase[p + c] = lerp(pale[c], dark[c], d);
     }
