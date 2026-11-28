@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Coppia di Schistosoma mansoni</title>
+<style>
+  /* Scena a tutto schermo su nero, didascalia minima in basso a sinistra. Tema unico scuro (sfondo nero richiesto). */
+  :root {
+    --bg: #000000;
+    --ink: rgba(236, 231, 222, 0.74);
+    --ink-dim: rgba(236, 231, 222, 0.44);
+    --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color-scheme: dark;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #hud {
+    position: fixed;
+    left: max(16px, env(safe-area-inset-left, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    font: 12px/1.45 var(--font-ui); letter-spacing: .02em;
+    pointer-events: none; user-select: none;
+  }
+  #hud .sp { font-style: italic; color: var(--ink); }
+  #hud .note { color: var(--ink-dim); }
+  #bar { height: 2px; width: 100px; background: var(--ink); margin: 0 0 4px; }
+  #hint {
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    font: 12px/1.45 var(--font-ui); color: var(--ink-dim); pointer-events: none; user-select: none;
+  }
+  #err { position: fixed; inset: 0; display: grid; place-items: center; font: 14px/1.5 var(--font-ui); color: var(--ink); padding-inline: max(16px, env(safe-area-inset-left, 0px)); text-align: center; }
+  .capture #hud, .capture #hint { display: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">
+  <div id="bar"></div><span id="barlabel">1 mm</span><br>
+  <span class="sp">Schistosoma mansoni</span> <span class="note">· maschio con la femmina nel canale ginecoforo</span>
+</div>
+<div id="hint">trascina per ruotare · rotella per zoom</div>
+<div id="err" hidden></div>
+<script type="module">
+import * as THREE from 'three';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const params = new URLSearchParams(location.search);
+const CAPTURE = params.has('capture');
+if (CAPTURE) document.documentElement.classList.add('capture');
+const REDUCED = !CAPTURE && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------------------------------------------------------------- utilità
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+let seed = 20261128 >>> 0;
+const rnd = () => { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed;
+  t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const srgb2lin = c => Math.pow(c / 255, 2.2);
+// campionamento più fitto alle estremità (punte arrotondate)
+const warp = (x, k = 0.8) => x - k * Math.sin(TAU * x) / TAU;
+// rumore 1D liscio (valore) per macchiettature
+const NOISE = Array.from({ length: 1024 }, rnd);
+const vnoise = x => { const i = Math.floor(x), f = x - i, a = NOISE[i & 1023], b = NOISE[(i + 1) & 1023];
+  const s = f * f * (3 - 2 * f); return a + (b - a) * s; };
+
+// ---------------------------------------------------------------- morfologia (mm, valori indicativi)
+// Maschio ~10 mm, femmina ~12 mm più sottile; canale ginecoforo dalla ventosa ventrale
+// all'estremità posteriore; tubercoli sulla superficie dorsale del maschio.
+const L_M = 10.0;          // lunghezza maschio
+const RHO_C = 0.235;       // raggio della linea media della lamina nel canale
+const TH_C = 0.15;         // spessore lamina nel canale
+const M_VS = 0.068;        // posizione ventosa ventrale (frazione della lunghezza)
+const M_MAX = 1.215;       // la spina prosegue oltre il maschio: coda libera della femmina
+const NM = 760;            // nodi della spina
+const DS = L_M * M_MAX / (NM - 1);
+
+// ---------------------------------------------------------------- renderer
+const W0 = parseInt(params.get('w') || '1920', 10), H0 = parseInt(params.get('h') || '1080', 10);
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: CAPTURE, powerPreference: 'high-performance' });
+} catch (e) {
+  const el = document.getElementById('err'); el.hidden = false;
+  el.textContent = 'Questo browser non riesce ad aprire WebGL, che serve per la scena 3D.';
+  throw e;
+}
+renderer.setPixelRatio(CAPTURE ? 1 : Math.min(window.devicePixelRatio || 1, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = parseFloat(params.get('exp') || '1.0');
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(27, 16 / 9, 0.5, 300);
+
+// ---------------------------------------------------------------- tre softbox virtuali
+RectAreaLightUniformsLib.init();
+const rig = new THREE.Group(); scene.add(rig);
+function softbox(w, h, intensity, color, x, y, z) {
+  const l = new THREE.RectAreaLight(color, intensity, w, h);
+  l.position.set(x, y, z); l.lookAt(0, 0, 0); rig.add(l); return l;
+}
+// key: grande, in alto a sinistra davanti, neutro-caldo
+const key = softbox(12, 16, 11.0, 0xfff1e2, -21, 14, 8);
+// fill: ampio, a destra, più debole e leggermente freddo
+const fill = softbox(22, 18, 0.45, 0xe6eeff, 20, 0, 12);
+// rim: strip box alta dietro il soggetto, disegna i contorni sul nero
+const rim = softbox(5, 26, 34.0, 0xffffff, 9, 11, -18);
+
+// ---------------------------------------------------------------- texture dei tubercoli (bump)
+// UV del maschio: u = posizione lungo il corpo (0 testa → 1 coda), v = posizione sul profilo della sezione.
+const V_OUT0 = 0.2, V_OUT1 = 0.8; // fascia di v occupata dalla superficie esterna (dorsale)
+function makeTubercleTexture() {
+  const TW = 4096, TH = 1024;
+  const c = document.createElement('canvas'); c.width = TW; c.height = TH;
+  const g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, TW, TH);
+  const arcOut = (RHO_C + TH_C / 2) * 4.7;            // mm, arco esterno nel canale
+  const pxU = TW / L_M, pxV = (V_OUT1 - V_OUT0) * TH / arcOut;
+  const sp = 0.05;                                   // passo medio fra tubercoli (mm)
+  let row = 0;
+  for (let xm = 1.15; xm < 9.8; xm += sp * 0.866, row++) {
+    const along = smooth(1.15, 1.6, xm) * smooth(9.8, 9.3, xm);
+    for (let ym = (row & 1) * sp / 2; ym < arcOut; ym += sp) {
+      const a = ym / arcOut;
+      const fade = smooth(0.06, 0.2, a) * smooth(0.94, 0.8, a) * along;
+      const r = (0.0105 + 0.006 * rnd()) * Math.sqrt(fade);
+      if (r < 0.004) continue;
+      const cx = (xm + (rnd() - 0.5) * sp * 0.5) * pxU;
+      const cy = (V_OUT0 + (a + (rnd() - 0.5) * sp * 0.5 / arcOut) * (V_OUT1 - V_OUT0)) * TH;
+      g.save(); g.translate(cx, cy); g.scale(r * pxU, r * pxV);
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+      gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.55, 'rgba(255,255,255,0.7)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr; g.beginPath(); g.arc(0, 0, 1, 0, TAU); g.fill(); g.restore();
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return tex;
+}
+
+// ---------------------------------------------------------------- materiali
+const tubTex = makeTubercleTexture();
+const maleMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true, roughness: 0.44, metalness: 0,
+  clearcoat: 0.7, clearcoatRoughness: 0.14,
+  sheen: 0.7, sheenRoughness: 0.55, sheenColor: new THREE.Color(0xffe2c4),
+  bumpMap: tubTex, bumpScale: parseFloat(params.get('bump') || '2.2'),
+});
+const suckerMat = new THREE.MeshPhysicalMaterial({
+  color: new THREE.Color().setRGB(srgb2lin(232), srgb2lin(208), srgb2lin(192)),
+  roughness: 0.38, clearcoat: 0.75, clearcoatRoughness: 0.14,
+  sheen: 0.6, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffd8c0),
+});
+const femaleMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true, roughness: 0.36, metalness: 0,
+  clearcoat: 0.75, clearcoatRoughness: 0.14,
+  sheen: 0.45, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xd8c8b8),
+});
+
+// ---------------------------------------------------------------- spina (curva inestensibile, integrata dalla curvatura)
+const SP = { P: new Float32Array(NM * 3), T: new Float32Array(NM * 3), N: new Float32Array(NM * 3), B: new Float32Array(NM * 3) };
+const _v = new THREE.Vector3(), _w = new THREE.Vector3();
+
+function curvature(m, t, out) {
+  // k1: flessione dorso-ventrale (negativo = verso ventrale), k2: laterale, tw: torsione (1/mm)
+  const head = Math.pow(clamp(1 - m / 0.16, 0, 1), 2);
+  let k1 = -0.085 + 0.19 * Math.sin(TAU * (1.05 * m - t / 9.5))
+         + 0.85 * head * Math.sin(TAU * t / 6.7 + 0.4);
+  let k2 = 0.045 + 0.16 * Math.sin(TAU * (0.8 * m + t / 12.5) + 0.7)
+         + 1.05 * head * Math.sin(TAU * t / 5.3 + 1.1);
+  const tw = 0.11 * Math.sin(TAU * (0.7 * m - t / 15) + 0.3);
+  // oltre la coda del maschio: estremità posteriore libera della femmina
+  const tail = smooth(0.99, 1.06, m);
+  k1 += tail * (0.55 * Math.sin(TAU * ((m - 1) * 3.6 - t / 6.2)) - 0.2);
+  k2 += tail * 0.7 * Math.sin(TAU * ((m - 1) * 2.8 - t / 7.4) + 0.5);
+  out[0] = k1; out[1] = k2; out[2] = tw;
+}
+
+function buildSpine(t) {
+  const { P, T, N, B } = SP;
+  const i0 = Math.round(0.5 / M_MAX * (NM - 1));
+  // orientamento globale lento: imbardata e rollio dell'intera coppia
+  const yaw = 0.42 * Math.sin(TAU * t / 31) - 0.08;
+  const roll = (params.has('roll') ? parseFloat(params.get('roll')) : -1.2 + 0.55 * Math.sin(TAU * t / 23 + 0.6));
+  const t0 = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  const n0 = new THREE.Vector3(0, 1, 0).applyAxisAngle(t0, roll);
+  const set = (A, i, v) => { A[i * 3] = v.x; A[i * 3 + 1] = v.y; A[i * 3 + 2] = v.z; };
+  const get = (A, i, v) => v.set(A[i * 3], A[i * 3 + 1], A[i * 3 + 2]);
+  set(P, i0, new THREE.Vector3()); set(T, i0, t0); set(N, i0, n0); set(B, i0, _v.crossVectors(t0, n0));
+  const k = [0, 0, 0];
+  const Tc = new THREE.Vector3(), Nc = new THREE.Vector3(), Bc = new THREE.Vector3(), Pc = new THREE.Vector3();
+  const Tn = new THREE.Vector3(), Nn = new THREE.Vector3();
+  for (const dir of [1, -1]) {
+    get(P, i0, Pc); get(T, i0, Tc); get(N, i0, Nc); get(B, i0, Bc);
+    for (let i = i0; dir > 0 ? i < NM - 1 : i > 0; i += dir) {
+      const m = (i + dir * 0.5) / (NM - 1) * M_MAX;
+      curvature(m, t, k);
+      const h = DS * dir;
+      Tn.copy(Tc).addScaledVector(Nc, h * k[0]).addScaledVector(Bc, h * k[1]).normalize();
+      Nn.copy(Nc).addScaledVector(Tn, -Nc.dot(Tn)).normalize().applyAxisAngle(Tn, h * k[2]);
+      Pc.addScaledVector(_w.copy(Tc).add(Tn), 0.5 * h);
+      Tc.copy(Tn); Nc.copy(Nn); Bc.crossVectors(Tc, Nc);
+      const j = i + dir;
+      set(P, j, Pc); set(T, j, Tc); set(N, j, Nc); set(B, j, Bc);
+    }
+  }
+  // centra la coppia nell'inquadratura
+  let cx = 0, cy = 0, cz = 0, n = 0;
+  for (let i = 0; i < NM; i += 4) { cx += P[i * 3]; cy += P[i * 3 + 1]; cz += P[i * 3 + 2]; n++; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < NM; i++) { P[i * 3] -= cx; P[i * 3 + 1] -= cy; P[i * 3 + 2] -= cz; }
+}
+
+const frame = { P: new THREE.Vector3(), T: new THREE.Vector3(), N: new THREE.Vector3(), B: new THREE.Vector3() };
+function spineAt(m, f = frame) {
+  const x = clamp(m / M_MAX, 0, 1) * (NM - 1);
+  const i = Math.min(NM - 2, Math.floor(x)), a = x - i;
+  const L = (A, v) => v.set(lerp(A[i * 3], A[i * 3 + 3], a), lerp(A[i * 3 + 1], A[i * 3 + 4], a), lerp(A[i * 3 + 2], A[i * 3 + 5], a));
+  L(SP.P, f.P); L(SP.T, f.T).normalize(); L(SP.N, f.N).normalize(); L(SP.B, f.B).normalize();
+  return f;
+}
+
+// ---------------------------------------------------------------- maschio: lamina arrotolata (sezione a C)
+const KI = 16, KC = 9, KO = 64;
+const K1 = 2 * (KI + 1) + 2 * KC + (KO + 1);   // punti per anello (con giunzione duplicata)
+const MR = 470;                                  // anelli lungo il corpo
+const vOf = new Float32Array(K1), aoOf = new Float32Array(K1);
+{
+  let j = 0;
+  for (let q = 0; q <= KI; q++, j++) { vOf[j] = 0.15 * q / KI; aoOf[j] = 0.34 + 0.16 * q / KI; }
+  for (let q = 0; q < KC; q++, j++) { vOf[j] = 0.15 + 0.05 * (q + 1) / (KC + 1); aoOf[j] = 0.62 + 0.36 * (q + 1) / (KC + 1); }
+  for (let q = 0; q <= KO; q++, j++) { vOf[j] = V_OUT0 + (V_OUT1 - V_OUT0) * q / KO; aoOf[j] = 1; }
+  for (let q = 0; q < KC; q++, j++) { vOf[j] = 0.8 + 0.05 * (q + 1) / (KC + 1); aoOf[j] = 0.98 - 0.36 * (q + 1) / (KC + 1); }
+  for (let q = 0; q <= KI; q++, j++) { vOf[j] = 0.85 + 0.15 * q / KI; aoOf[j] = 0.5 - 0.16 * q / KI; }
+}
+const maleGeo = new THREE.BufferGeometry();
+const mPos = new Float32Array(MR * K1 * 3), mUV = new Float32Array(MR * K1 * 2), mCol = new Float32Array(MR * K1 * 3);
+{
+  const idx = [];
+  for (let i = 0; i < MR - 1; i++) for (let j = 0; j < K1 - 1; j++) {
+    const a = i * K1 + j, b = a + 1, c = a + K1, d = c + 1;
+    idx.push(a, b, c, b, d, c);
+  }
+  maleGeo.setIndex(idx);
+  const base = [srgb2lin(236), srgb2lin(224), srgb2lin(204)];
+  for (let i = 0; i < MR; i++) {
+    const m = warp(i / (MR - 1), 0.7), can = smooth(0.075, 0.16, m);
+    const tone = 0.96 + 0.05 * vnoise(m * 40);
+    for (let j = 0; j < K1; j++) {
+      const p = i * K1 + j;
+      mUV[p * 2] = m; mUV[p * 2 + 1] = vOf[j];
+      const ao = lerp(1, aoOf[j], can);
+      mCol[p * 3] = base[0] * ao * tone; mCol[p * 3 + 1] = base[1] * ao * tone; mCol[p * 3 + 2] = base[2] * ao * tone;
+    }
+  }
+  maleGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3).setUsage(THREE.DynamicDrawUsage));
+  maleGeo.setAttribute('uv', new THREE.BufferAttribute(mUV, 2));
+  maleGeo.setAttribute('color', new THREE.BufferAttribute(mCol, 3));
+}
+const maleMesh = new THREE.Mesh(maleGeo, maleMat); maleMesh.frustumCulled = false; scene.add(maleMesh);
+
+const sx = new Float32Array(K1), sy = new Float32Array(K1);
+function maleSection(m, t) {
+  // parametri della sezione: larghezza della lamina w, spessore th, angolo di arrotolamento phi
+  const can = smooth(0.075, 0.16, m);
+  const phiC = 4.7 + 0.28 * Math.sin(TAU * (1.7 * m + t / 13));
+  let phi = lerp(0.7, phiC, can);
+  let w = lerp(0.12, phiC * RHO_C, can);
+  const th = lerp(0.27, TH_C, can);
+  const yTop = lerp(0.19, RHO_C, can);
+  const thin = 0.45 * can;
+  let sc = 1 + 0.035 * can * Math.sin(TAU * (3.2 * m - t / 3.4));
+  let px = 0, py = 0;                               // centro di scala
+  sc *= 1 - 0.14 * smooth(0.86, 0.96, m);           // coda leggermente assottigliata
+  py = yTop * smooth(0.93, 0.96, m);                // la punta si chiude verso il lato dorsale
+  if (m > 0.955) { const e = (m - 0.955) / 0.045; sc *= Math.sqrt(Math.max(0, 1 - e * e)); phi *= 1 - 0.3 * e; }
+  if (m < 0.03) { const e = (0.03 - m) / 0.03; sc *= 0.5 + 0.5 * Math.sqrt(Math.max(0, 1 - e * e)); py = yTop - 0.1; }
+  const rho = phi > 1e-3 ? w / phi : 0;
+  let j = 0;
+  const cl = (u) => {              // linea media: punto, normale esterna, tangente
+    if (phi <= 1e-3) return [u * w / 2, yTop, 0, 1, 1, 0];
+    const a = u * phi / 2, s = Math.sin(a), c = Math.cos(a);
+    return [rho * s, yTop + rho * (c - 1), s, c, c, -s];
+  };
+  const hh = (u) => th / 2 * (1 - thin * u * u);
+  const put = (x, y) => { sx[j] = px + (x - px) * sc; sy[j] = py + (y - py) * sc; j++; };
+  for (let q = 0; q <= KI; q++) { const u = -q / KI; const [x, y, nx, ny] = cl(u), h = hh(u); put(x - nx * h, y - ny * h); }
+  { const [x, y, nx, ny, tx, ty] = cl(-1), h = hh(-1);
+    for (let q = 0; q < KC; q++) { const a = -Math.PI / 2 + Math.PI * (q + 1) / (KC + 1);
+      put(x + h * (nx * Math.sin(a) - tx * Math.cos(a)), y + h * (ny * Math.sin(a) - ty * Math.cos(a))); } }
+  for (let q = 0; q <= KO; q++) { const u = -1 + 2 * q / KO; const [x, y, nx, ny] = cl(u), h = hh(u); put(x + nx * h, y + ny * h); }
+  { const [x, y, nx, ny, tx, ty] = cl(1), h = hh(1);
+    for (let q = 0; q < KC; q++) { const a = Math.PI / 2 - Math.PI * (q + 1) / (KC + 1);
+      put(x + h * (nx * Math.sin(a) + tx * Math.cos(a)), y + h * (ny * Math.sin(a) + ty * Math.cos(a))); } }
+  for (let q = 0; q <= KI; q++) { const u = 1 - q / KI; const [x, y, nx, ny] = cl(u), h = hh(u); put(x - nx * h, y - ny * h); }
+}
+
+function fixSeam(geo, rings, K) {
+  const n = geo.attributes.normal.array;
+  for (let i = 0; i < rings; i++) {
+    const a = i * K * 3, b = (i * K + K - 1) * 3;
+    let x = n[a] + n[b], y = n[a + 1] + n[b + 1], z = n[a + 2] + n[b + 2];
+    const l = Math.hypot(x, y, z) || 1; x /= l; y /= l; z /= l;
+    n[a] = n[b] = x; n[a + 1] = n[b + 1] = y; n[a + 2] = n[b + 2] = z;
+  }
+}
+
+function updateMale(t) {
+  for (let i = 0; i < MR; i++) {
+    const m = warp(i / (MR - 1), 0.7);
+    const f = spineAt(m);
+    maleSection(m, t);
+    for (let j = 0; j < K1; j++) {
+      const p = (i * K1 + j) * 3, x = sx[j], y = sy[j];
+      mPos[p] = f.P.x + f.B.x * x + f.N.x * y;
+      mPos[p + 1] = f.P.y + f.B.y * x + f.N.y * y;
+      mPos[p + 2] = f.P.z + f.B.z * x + f.N.z * y;
+    }
+  }
+  maleGeo.attributes.position.needsUpdate = true;
+  maleGeo.computeVertexNormals();
+  fixSeam(maleGeo, MR, K1);
+}
+
+// ---------------------------------------------------------------- ventose del maschio
+const V2 = (r, y) => new THREE.Vector2(r, y);
+const oralGeo = new THREE.LatheGeometry([V2(0.001, -0.1), V2(0.085, -0.09), V2(0.118, -0.02), V2(0.128, 0.035), V2(0.118, 0.074),
+  V2(0.098, 0.09), V2(0.074, 0.082), V2(0.058, 0.06), V2(0.042, 0.044), V2(0.024, 0.037), V2(0.01, 0.035), V2(0.001, 0.035)], 64);
+const ventralGeo = new THREE.LatheGeometry([V2(0.001, -0.08), V2(0.098, -0.07), V2(0.104, 0.02), V2(0.122, 0.075), V2(0.152, 0.125),
+  V2(0.158, 0.158), V2(0.145, 0.183), V2(0.12, 0.193), V2(0.098, 0.183), V2(0.084, 0.158), V2(0.066, 0.135),
+  V2(0.044, 0.124), V2(0.022, 0.12), V2(0.001, 0.119)], 64);
+const oral = new THREE.Mesh(oralGeo, suckerMat), ventral = new THREE.Mesh(ventralGeo, suckerMat);
+scene.add(oral, ventral);
+const _q = new THREE.Quaternion(), _y = new THREE.Vector3(0, 1, 0), _ax = new THREE.Vector3();
+function placeSucker(mesh, m, yLocal, tiltFwd, pulse, fwd = 0) {
+  const f = spineAt(m);
+  _ax.copy(f.N).multiplyScalar(-Math.cos(tiltFwd)).addScaledVector(f.T, -Math.sin(tiltFwd)).normalize();
+  _q.setFromUnitVectors(_y, _ax);
+  // allinea anche la rotazione attorno all'asse (irrilevante per la simmetria, ma stabile)
+  mesh.quaternion.copy(_q);
+  mesh.position.copy(f.P).addScaledVector(f.N, yLocal).addScaledVector(f.T, -fwd);
+  mesh.scale.set(1 + 0.06 * pulse, 1 - 0.05 * pulse, 1 + 0.06 * pulse);
+}
+
+// ---------------------------------------------------------------- femmina: tubo con profilo di raggio, pigmento posteriore
+const FR = 380, FS = 30, FK = FS + 1;
+const M_FA = 0.035, M_FB = M_MAX - 0.004;
+const L_F = (M_FB - M_FA) * L_M;
+const femaleGeo = new THREE.BufferGeometry();
+const fPos = new Float32Array(FR * FK * 3), fCol = new Float32Array(FR * FK * 3), fBase = new Float32Array(FR * FK * 3);
+{
+  const idx = [];
+  for (let i = 0; i < FR - 1; i++) for (let j = 0; j < FS; j++) {
+    const a = i * FK + j, b = a + 1, c = a + FK, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  femaleGeo.setIndex(idx);
+  const pale = [srgb2lin(214), srgb2lin(200), srgb2lin(182)];
+  const dark = [srgb2lin(44), srgb2lin(32), srgb2lin(26)];
+  for (let i = 0; i < FR; i++) {
+    const sg = warp(i / (FR - 1)) * L_F;               // mm dall'estremità anteriore
+    for (let j = 0; j < FK; j++) {
+      const th = j / FS * TAU;
+      // parte anteriore chiara; dalla metà anteriore in poi vitellaria e intestino pigmentato scuriscono il corpo
+      const mott = 0.6 * vnoise(sg * 9 + 13 * Math.cos(th) + 50) + 0.4 * vnoise(sg * 23 + 7 * Math.sin(th) + 300);
+      const d = clamp(smooth(2.4, 4.3, sg) * (0.78 + 0.32 * mott), 0, 1);
+      const p = (i * FK + j) * 3;
+      for (let c = 0; c < 3; c++) fBase[p + c] = lerp(pale[c], dark[c], d);
+    }
+  }
+  femaleGeo.setAttribute('position', new THREE.BufferAttribute(fPos, 3).setUsage(THREE.DynamicDrawUsage));
+  femaleGeo.setAttribute('color', new THREE.BufferAttribute(fCol, 3).setUsage(THREE.DynamicDrawUsage));
+}
+const femaleMesh = new THREE.Mesh(femaleGeo, femaleMat); femaleMesh.frustumCulled = false; scene.add(femaleMesh);
+
+function femaleRadius(sg, t, free) {
+  let r = 0.052 + 0.063 * smooth(0.25, 3.6, sg);
+  r *= 1 - 0.3 * smooth(L_F - 1.2, L_F, sg);
+  r *= Math.sqrt(clamp(sg / 0.07, 0, 1) * (2 - clamp(sg / 0.07, 0, 1))) * Math.sqrt(clamp((L_F - sg) / 0.14, 0, 1) * (2 - clamp((L_F - sg) / 0.14, 0, 1)));
+  r *= 1 + 0.06 * free * Math.sin(TAU * (sg * 1.25 - t / 2.9));
+  return r;
+}
+const fc = new Float32Array(FR * 3), fN = new Float32Array(FR * 3), fM = new Float32Array(FR), fCov = new Float32Array(FR);
+const gN = new Float32Array(FR * 3);
+function updateFemale(t) {
+  for (let i = 0; i < FR; i++) {
+    const m = lerp(M_FA, M_FB, warp(i / (FR - 1)));
+    const f = spineAt(m);
+    // fuori dal canale: la parte anteriore esce in basso e di lato, passando accanto alla ventosa ventrale
+    const ta = smooth(0.135, 0.06, m), td = smooth(0.17, 0.1, m);
+    const wa = smooth(0.1, 0.018, m);
+    let offB = 0.24 * ta + 0.08 * wa * Math.sin(70 * m - TAU * t / 4.3);
+    let offN = -0.02 - 0.2 * td + 0.06 * wa * Math.sin(55 * m - TAU * t / 5.1 + 1.3);
+    offN -= 0.16 * smooth(0.95, 1.03, m);              // esce sotto la coda del maschio
+    fc[i * 3] = f.P.x + f.B.x * offB + f.N.x * offN;
+    fc[i * 3 + 1] = f.P.y + f.B.y * offB + f.N.y * offN;
+    fc[i * 3 + 2] = f.P.z + f.B.z * offB + f.N.z * offN;
+    fN[i * 3] = f.N.x; fN[i * 3 + 1] = f.N.y; fN[i * 3 + 2] = f.N.z;
+    fM[i] = m;
+    fCov[i] = smooth(0.11, 0.18, m) * smooth(0.985, 0.94, m);
+  }
+  const T = new THREE.Vector3(), N = new THREE.Vector3(), B = new THREE.Vector3(), d = new THREE.Vector3(), gap = new THREE.Vector3();
+  for (let i = 0; i < FR; i++) {
+    const a = Math.max(0, i - 1), b = Math.min(FR - 1, i + 1);
+    T.set(fc[b * 3] - fc[a * 3], fc[b * 3 + 1] - fc[a * 3 + 1], fc[b * 3 + 2] - fc[a * 3 + 2]).normalize();
+    N.set(fN[i * 3], fN[i * 3 + 1], fN[i * 3 + 2]); N.addScaledVector(T, -N.dot(T)).normalize();
+    B.crossVectors(T, N);
+    gap.copy(N).negate();                               // apertura del canale: lato ventrale
+    const sg = warp(i / (FR - 1)) * L_F;
+    const r = femaleRadius(sg, t, 1 - fCov[i]);
+    for (let j = 0; j < FK; j++) {
+      const th = j / FS * TAU;
+      d.copy(N).multiplyScalar(Math.cos(th)).addScaledVector(B, Math.sin(th));
+      const p = (i * FK + j) * 3;
+      fPos[p] = fc[i * 3] + d.x * r; fPos[p + 1] = fc[i * 3 + 1] + d.y * r; fPos[p + 2] = fc[i * 3 + 2] + d.z * r;
+      // occlusione dentro il canale: in luce solo la parte che guarda l'apertura ventrale
+      const face = d.dot(gap);
+      const ao = lerp(1, lerp(0.3, 1.0, smooth(-0.35, 0.75, face)), fCov[i]);
+      fCol[p] = fBase[p] * ao; fCol[p + 1] = fBase[p + 1] * ao; fCol[p + 2] = fBase[p + 2] * ao;
+    }
+  }
+  femaleGeo.attributes.position.needsUpdate = true;
+  femaleGeo.attributes.color.needsUpdate = true;
+  femaleGeo.computeVertexNormals();
+  fixSeam(femaleGeo, FR, FK);
+}
+
+// ---------------------------------------------------------------- camera
+const controls = CAPTURE ? null : new OrbitControls(camera, renderer.domElement);
+let userDriven = false;
+if (controls) {
+  controls.enableDamping = true; controls.minDistance = 3; controls.maxDistance = 45; controls.enablePan = false;
+  controls.addEventListener('start', () => { userDriven = true; document.getElementById('hint').hidden = true; });
+}
+const DIST = parseFloat(params.get('dist') || '13.5');
+function autoCamera(t) {
+  const az = params.has('az') ? parseFloat(params.get('az')) : 0.28 * Math.sin(TAU * t / 41) + 0.06;
+  const el = params.has('el') ? parseFloat(params.get('el')) : 0.30 + 0.07 * Math.sin(TAU * t / 33 + 1.0);
+  camera.position.set(DIST * Math.sin(az) * Math.cos(el), DIST * Math.sin(el), DIST * Math.cos(az) * Math.cos(el));
+  if (params.has('fm')) { const f = spineAt(parseFloat(params.get('fm'))); camera.position.add(f.P); camera.lookAt(f.P); }
+  else camera.lookAt(0, 0, 0);
+}
+function syncRig() {
+  // le softbox seguono la camera, come in uno studio dove si gira attorno al soggetto
+  _v.copy(camera.position); rig.rotation.y = Math.atan2(_v.x, _v.z);
+}
+
+// ---------------------------------------------------------------- dimensioni / HUD
+const bar = document.getElementById('bar');
+function resize() {
+  const w = CAPTURE ? W0 : window.innerWidth, h = CAPTURE ? H0 : window.innerHeight;
+  renderer.setSize(w, h, !CAPTURE ? true : false);
+  camera.aspect = w / h;
+  // su schermi stretti allontana la camera per tenere tutta la coppia in campo
+  camera.fov = w / h < 1 ? 27 * Math.min(1.9, 1.1 / (w / h)) : 27;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+function updateBar() {
+  const d = camera.position.length();
+  const pxPerMm = window.innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * d);
+  bar.style.width = Math.round(pxPerMm) + 'px';
+}
+
+// ---------------------------------------------------------------- ciclo
+function renderAt(t) {
+  buildSpine(t);
+  updateMale(t);
+  updateFemale(t);
+  placeSucker(oral, 0.0, 0.085, 1.3, Math.sin(TAU * t / 2.3), -0.01);
+  placeSucker(ventral, M_VS, 0.07, 0.2, Math.sin(TAU * t / 3.7 + 1));
+  if (!userDriven) autoCamera(t);
+  syncRig();
+  renderer.render(scene, camera);
+}
+if (params.has('nomale')) { maleMesh.visible = false; oral.visible = false; ventral.visible = false; }
+window.__renderAt = (t) => { renderAt(t); return true; };
+window.__ready = true;
+
+if (!CAPTURE) {
+  let t = parseFloat(params.get('t') || '0'), last = performance.now();
+  const loop = (now) => {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (!REDUCED && !document.hidden) t += dt;
+    if (controls && userDriven) controls.update();
+    renderAt(t);
+    updateBar();
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
