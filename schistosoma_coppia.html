@@ -222,9 +222,10 @@ function buildSpine(t) {
     }
   }
   // centra la coppia nell'inquadratura
-  let cx = 0, cy = 0, cz = 0, n = 0;
-  for (let i = 0; i < NM; i += 4) { cx += P[i * 3]; cy += P[i * 3 + 1]; cz += P[i * 3 + 2]; n++; }
-  cx /= n; cy /= n; cz /= n;
+  // centro del riquadro che contiene la coppia (non il baricentro: la testa oscilla e uscirebbe dal campo)
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (let i = 0; i < NM; i += 2) for (let c = 0; c < 3; c++) { const v = P[i * 3 + c]; if (v < lo[c]) lo[c] = v; if (v > hi[c]) hi[c] = v; }
+  const cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2, cz = (lo[2] + hi[2]) / 2;
   for (let i = 0; i < NM; i++) { P[i * 3] -= cx; P[i * 3 + 1] -= cy; P[i * 3 + 2] -= cz; }
 }
 
@@ -449,7 +450,7 @@ if (controls) {
   controls.enableDamping = true; controls.minDistance = 3; controls.maxDistance = 45; controls.enablePan = false;
   controls.addEventListener('start', () => { userDriven = true; document.getElementById('hint').hidden = true; });
 }
-const DIST = parseFloat(params.get('dist') || '13.5');
+const DIST = parseFloat(params.get('dist') || '14.8');
 function autoCamera(t) {
   const az = params.has('az') ? parseFloat(params.get('az')) : 0.28 * Math.sin(TAU * t / 41) + 0.06;
   const el = params.has('el') ? parseFloat(params.get('el')) : 0.30 + 0.07 * Math.sin(TAU * t / 33 + 1.0);
