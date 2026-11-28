@@ -76,6 +76,19 @@ const srgb2lin = c => Math.pow(c / 255, 2.2);
 const linRGB = (r, g, b) => new THREE.Color().setRGB(srgb2lin(r), srgb2lin(g), srgb2lin(b));
 // campionamento più fitto alle estremità (punte arrotondate)
 const warp = (x, k = 0.8) => x - k * Math.sin(TAU * x) / TAU;
+// profilo per punti di controllo [t, v1, v2, ...], interpolazione cubica di Hermite
+function makeProfile(pts) {
+  const n = pts.length, dim = pts[0].length - 1;
+  const tan = pts.map((p, k) => { const a = pts[Math.max(0, k - 1)], b = pts[Math.min(n - 1, k + 1)];
+    return p.slice(1).map((_, d) => (b[d + 1] - a[d + 1]) / (b[0] - a[0])); });
+  return (t, out) => {
+    let k = 0; while (k < n - 2 && t > pts[k + 1][0]) k++;
+    const h = pts[k + 1][0] - pts[k][0], u = clamp((t - pts[k][0]) / h, 0, 1), u2 = u * u, u3 = u2 * u;
+    const h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u, h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
+    for (let d = 0; d < dim; d++) out[d] = h00 * pts[k][d + 1] + h10 * h * tan[k][d] + h01 * pts[k + 1][d + 1] + h11 * h * tan[k + 1][d];
+    return out;
+  };
+}
 // rumore 1D liscio (valore) per macchiettature
 const NOISE = Array.from({ length: 1024 }, rnd);
 const vnoise = x => { const i = Math.floor(x), f = x - i, a = NOISE[i & 1023], b = NOISE[(i + 1) & 1023];
@@ -92,8 +105,10 @@ const TH_C = 0.16;         // spessore lamina nel canale
 const PHI_MEAN = 4.7;      // arrotolamento medio della lamina (rad)
 const M_VS = 0.075;        // posizione ventosa ventrale (frazione della lunghezza)
 const M_EXIT = 0.15;       // apertura anteriore del canale da cui esce la femmina
-const LH = 1.4;            // parte anteriore libera della femmina (mm)
-const M_MAX = 1.215;       // la spina prosegue oltre il maschio: coda libera della femmina
+const LH = 0.9;            // parte anteriore libera della femmina (mm)
+const M_MAX = 1.10;        // la spina prosegue oltre il maschio: coda libera della femmina (~1 mm)
+const M_OS = 0.035;        // inizio della ventosa orale del maschio (frazione della lunghezza)
+const S_OS = 0.06;         // lunghezza della ventosa orale della femmina (mm)
 const NM = 820;            // nodi della spina
 const DS = L_M * M_MAX / (NM - 1);
 
@@ -113,13 +128,13 @@ renderer.toneMappingExposure = num('exp', 1.0);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const SHADOWS = num('sh', 1) > 0;
 renderer.shadowMap.enabled = SHADOWS;
-renderer.shadowMap.type = THREE.VSMShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
 document.body.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
-const camera = new THREE.PerspectiveCamera(27, 16 / 9, 0.5, 300);
+const camera = new THREE.PerspectiveCamera(27, 16 / 9, 0.1, 100);
 
 // ---------------------------------------------------------------- tre softbox virtuali
 RectAreaLightUniformsLib.init();
@@ -132,7 +147,7 @@ function softbox(w, h, intensity, color, x, y, z) {
 const KEY_POS = new THREE.Vector3(-21, 14, 8);
 const key = softbox(12, 16, num('key', 7.0), 0xfff1e2, KEY_POS.x, KEY_POS.y, KEY_POS.z);
 // fill: ampio, a destra, più debole e leggermente freddo
-const fill = softbox(22, 18, num('fill', 0.55), 0xe6eeff, 20, 0, 12);
+const fill = softbox(24, 20, num('fill', 1.0), 0xe6eeff, 20, 0, 12);
 // rim: strip box alta dietro il soggetto, disegna i contorni sul nero
 const rim = softbox(5, 26, num('rim', 30.0), 0xffffff, 9, 11, -18);
 // ombra morbida della key: le RectAreaLight non proiettano ombre, quindi una parte della key
@@ -142,8 +157,8 @@ keyShadow.position.copy(KEY_POS);
 keyShadow.castShadow = SHADOWS;
 {
   const s = keyShadow.shadow, c = s.camera;
-  s.mapSize.set(1024, 1024); c.left = -4.5; c.right = 4.5; c.top = 4.5; c.bottom = -4.5; c.near = 10; c.far = 50;
-  s.radius = 10; s.blurSamples = 20; s.bias = -0.0006; s.normalBias = 0.004;
+  s.mapSize.set(2048, 2048); c.left = -4.5; c.right = 4.5; c.top = 4.5; c.bottom = -4.5; c.near = 10; c.far = 50;
+  s.radius = 3; s.bias = -0.0004; s.normalBias = 0.006;
 }
 rig.add(keyShadow); scene.add(keyShadow.target);
 
@@ -193,7 +208,15 @@ function makeMaleTextures() {
       dome(g, u * pxU, v * TH, r * pxU, r * pv, a);
     }
   };
-  fine(0.05, 1.1, 0.0, 1.0, 1700, 0.004, 0.007, 0.5, pxVfore);      // collo
+  fine(0.17, 1.1, 0.0, 1.0, 1600, 0.004, 0.007, 0.5, pxVfore);      // collo e parete esterna della ventosa orale
+  // striature radiali sulle labbra della ventosa orale (u ≈ 0.06–0.16 mm)
+  for (let k = 0; k < 90; k++) {
+    const y = (k + 0.5 * rnd()) / 90 * TH, x0 = 0.055 * pxU, x1 = (0.15 + 0.02 * rnd()) * pxU;
+    const gr = g.createLinearGradient(x0, 0, x1, 0);
+    gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.5)');
+    gr.addColorStop(0.8, 'rgba(255,255,255,0.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(x0, y - 2.5, x1 - x0, 5);
+  }
   fine(1.0, 9.9, 0.0, 0.15, 2600, 0.003, 0.006, 0.4, pxVin);         // interno del canale
   fine(1.0, 9.9, 0.85, 1.0, 2600, 0.003, 0.006, 0.4, pxVin);
   fine(1.0, 9.9, 0.15, 0.2, 900, 0.004, 0.007, 0.45, pxV);           // margini
@@ -245,7 +268,7 @@ function makeFemaleTexture() {
     for (const dx of [-TW, 0, TW]) for (const dy of [-TH, 0, TH]) {
       const X = x + dx, Y = y + dy;
       if (X < -20 || X > TW + 20 || Y < -20 || Y > TH + 20) continue;
-      dome(g, X, Y, r * pxU, r * pxV, 0.45);
+      dome(g, X, Y, r * pxU, r * pxV, 0.3);
     }
   }
   for (let xm = 0; xm < F_UREP; xm += 0.03 + 0.03 * rnd()) {
@@ -280,14 +303,9 @@ const femaleMat = new THREE.MeshPhysicalMaterial({
   vertexColors: true, roughness: 0.58, metalness: 0,
   clearcoat: 0.15, clearcoatRoughness: 0.4,
   sheen: 0.8, sheenRoughness: 0.45, sheenColor: linRGB(236, 230, 222),
-  bumpMap: femTex, bumpScale: num('fbump', 1.4),
+  bumpMap: femTex, bumpScale: num('fbump', 0.8),
 });
 suckerMat.bumpMap = femTex; suckerMat.bumpScale = 1.0;
-const femSuckerMat = new THREE.MeshPhysicalMaterial({
-  color: linRGB(214, 201, 184), roughness: 0.58,
-  bumpMap: femTex, bumpScale: 1.0, clearcoat: 0.15, clearcoatRoughness: 0.4,
-  sheen: 0.8, sheenRoughness: 0.45, sheenColor: linRGB(236, 230, 222),
-});
 
 // ---------------------------------------------------------------- spina (curva inestensibile, integrata dalla curvatura)
 const SP = { P: new Float32Array(NM * 3), T: new Float32Array(NM * 3), N: new Float32Array(NM * 3), B: new Float32Array(NM * 3) };
@@ -304,7 +322,7 @@ function curvature(m, t, out) {
          + head * 1.1 * Math.sin(TAU * t / 5.9 + 1.1);
   const tw = num('tw', 0.13) + 0.03 * Math.sin(TAU * (0.6 * m - t / 15) + 0.3);
   // oltre la coda del maschio: estremità posteriore libera della femmina, si stacca dalla spirale
-  const tail = smooth(0.99, 1.12, m);
+  const tail = smooth(0.99, 1.07, m);
   k1 = lerp(k1, 0.15 + 0.8 * Math.sin(TAU * ((m - 1) * 3.2 - t / 6.2)), tail);
   k2 += tail * (num('tk2', 0.5) + 0.9 * Math.sin(TAU * ((m - 1) * 2.6 - t / 7.4) + 0.5));
   out[0] = k1; out[1] = k2; out[2] = tw;
@@ -415,7 +433,6 @@ function maleSection(m, t) {
   const px = 0;
   const py = m < 0.5 ? FORE_Y * (1 - smooth(0.07, 0.13, m)) : yTop * smooth(0.93, 0.96, m);
   if (m > 0.955) { const e = (m - 0.955) / 0.045; sc *= Math.sqrt(Math.max(0, 1 - e * e)); phi *= 1 - 0.3 * e; }
-  if (m < 0.025) { const e = (0.025 - m) / 0.025; sc *= 0.55 + 0.45 * Math.sqrt(Math.max(0, 1 - e * e)); }
   const rho = phi > 1e-3 ? w / phi : 0;
   let j = 0;
   const cl = (u) => {              // linea media: punto, normale esterna, tangente
@@ -460,9 +477,22 @@ function fixSeam(geo, rings, K) {
   }
 }
 
+// ventosa orale del maschio: prosegue il collo senza stacco, si allarga appena, poi le labbra spesse
+// si ripiegano verso l'interno attorno a un'apertura ovale (larga e bassa) che guarda in avanti e in basso.
+// colonne: t (0 giunzione col collo → 1 fondo della cavità), z lungo l'asse (mm), raggio relativo, schiacciamento dorso-ventrale
+const OS_PROFILE = makeProfile([
+  [0.00, 0.000, 1.00, 1.00], [0.18, 0.050, 1.04, 1.00], [0.34, 0.098, 1.04, 0.98], [0.46, 0.135, 0.97, 0.93],
+  [0.55, 0.160, 0.86, 0.86], [0.62, 0.176, 0.74, 0.78], [0.68, 0.186, 0.63, 0.70], [0.73, 0.190, 0.54, 0.62],
+  [0.78, 0.186, 0.46, 0.55], [0.84, 0.170, 0.40, 0.48], [0.90, 0.140, 0.33, 0.44], [0.95, 0.110, 0.22, 0.42],
+  [1.00, 0.095, 0.04, 0.42]]);
+const mOf = Float32Array.from({ length: MR }, (_, i) => warp(i / (MR - 1), 0.7));
+const I_OS = mOf.findIndex(m => m >= M_OS);
+const frJ = { P: new THREE.Vector3(), T: new THREE.Vector3(), N: new THREE.Vector3(), B: new THREE.Vector3() };
+const bx = new Float32Array(K1), by = new Float32Array(K1), prof = [0, 0, 0];
+const osC = new THREE.Vector3(), osD = new THREE.Vector3(), osN = new THREE.Vector3();
 function updateMale(t) {
-  for (let i = 0; i < MR; i++) {
-    const m = warp(i / (MR - 1), 0.7);
+  for (let i = I_OS; i < MR; i++) {
+    const m = mOf[i];
     const f = spineAt(m);
     maleSection(m, t);
     for (let j = 0; j < K1; j++) {
@@ -470,6 +500,29 @@ function updateMale(t) {
       mPos[p] = f.P.x + f.B.x * x + f.N.x * y;
       mPos[p + 1] = f.P.y + f.B.y * x + f.N.y * y;
       mPos[p + 2] = f.P.z + f.B.z * x + f.N.z * y;
+    }
+  }
+  // ventosa orale: anelli costruiti lungo un asse che parte dal collo e piega verso il lato ventrale
+  const fj = spineAt(M_OS, frJ);
+  maleSection(M_OS, t);
+  for (let k = 0; k < K1; k++) { bx[k] = sx[k]; by[k] = sy[k] - FORE_Y; }
+  osC.copy(fj.P).addScaledVector(fj.N, FORE_Y);
+  const pulse = Math.sin(TAU * t / 2.3);
+  let zPrev = 0;
+  for (let i = I_OS - 1; i >= 0; i--) {
+    const tau = 1 - mOf[i] / M_OS;
+    OS_PROFILE(tau, prof);
+    const open = smooth(0.55, 0.75, tau);
+    const rs = prof[1] * (1 + 0.07 * pulse * open), ay = prof[2] * (1 + 0.2 * pulse * open);
+    const al = 0.5 * smooth(0.05, 0.5, tau);
+    osD.copy(fj.T).multiplyScalar(-Math.cos(al)).addScaledVector(fj.N, -Math.sin(al));
+    osC.addScaledVector(osD, prof[0] - zPrev); zPrev = prof[0];
+    osN.crossVectors(osD, fj.B).normalize();
+    for (let k = 0; k < K1; k++) {
+      const p = (i * K1 + k) * 3, x = bx[k] * rs, y = by[k] * rs * ay;
+      mPos[p] = osC.x + fj.B.x * x + osN.x * y;
+      mPos[p + 1] = osC.y + fj.B.y * x + osN.y * y;
+      mPos[p + 2] = osC.z + fj.B.z * x + osN.z * y;
     }
   }
   maleGeo.attributes.position.needsUpdate = true;
@@ -515,28 +568,15 @@ function densify(ctrl, per) {
   out.push(ctrl[ctrl.length - 1]);
   return out;
 }
-// ventosa orale del maschio: cappuccio muscolare in punta, apertura ovale con labbra spesse e striate
-const oralGeo = makeLathe(densify([
-  [0.001, -0.15, 0], [0.135, -0.145, 0], [0.15, -0.07, 0], [0.16, 0.0, 0], [0.157, 0.045, 0], [0.142, 0.085, 1],
-  [0.118, 0.118, 1], [0.09, 0.138, 1], [0.066, 0.145, 1], [0.05, 0.138, 2], [0.042, 0.118, 2], [0.034, 0.092, 2],
-  [0.02, 0.078, 2], [0.001, 0.074, 2]], 3), 72,
-  (i, th, r, y, kind) => kind === 1 ? [0.0028 * Math.sin(th * 30) * smooth(0.13, 0.07, r), 0.0015 * Math.sin(th * 30)]
-                      : kind === 2 ? [0.0025 * Math.sin(th * 18 + 1), 0] : [0, 0]);
 // ventosa ventrale del maschio: disco su breve peduncolo, bordo spesso, pieghe radiali verso il centro
 const ventralGeo = makeLathe(densify([
   [0.001, -0.07, 0], [0.1, -0.065, 0], [0.104, 0.0, 0], [0.112, 0.05, 0], [0.14, 0.085, 0], [0.172, 0.115, 0],
   [0.188, 0.145, 1], [0.184, 0.172, 1], [0.168, 0.19, 1], [0.142, 0.193, 1], [0.12, 0.185, 2], [0.1, 0.168, 2],
   [0.075, 0.15, 2], [0.05, 0.138, 2], [0.025, 0.131, 2], [0.001, 0.129, 2]], 3), 80,
-  (i, th, r, y, kind) => kind === 1 ? [0.005 * Math.sin(th * 7 + 0.6) + 0.002 * Math.sin(th * 31), 0.003 * Math.sin(th * 7 + 0.6)]
+  (i, th, r, y, kind) => kind === 1 ? [0.0022 * Math.sin(th * 7 + 0.6) + 0.0012 * Math.sin(th * 31), 0.0015 * Math.sin(th * 7 + 0.6)]
                       : kind === 2 ? [0, 0.009 * Math.sin(th * 11) * smooth(0.0, 0.05, r) * smooth(0.13, 0.08, r)] : [0, 0]);
-const oral = new THREE.Mesh(oralGeo, suckerMat), ventral = new THREE.Mesh(ventralGeo, suckerMat);
-// ventose della femmina: piccole, in punta e poco dietro (lato ventrale)
-const fOralGeo = makeLathe(densify([[0.001, -0.075, 0], [0.034, -0.072, 0], [0.037, -0.04, 0], [0.037, 0.0, 0],
-  [0.032, 0.014, 1], [0.024, 0.022, 1], [0.016, 0.024, 1], [0.011, 0.019, 2], [0.007, 0.011, 2], [0.001, 0.009, 2]], 3), 40);
-const fVentralGeo = makeLathe(densify([[0.001, -0.02, 0], [0.024, -0.018, 0], [0.028, 0.0, 0], [0.026, 0.008, 1],
-  [0.018, 0.012, 1], [0.011, 0.009, 2], [0.006, 0.002, 2], [0.001, 0.0, 2]], 3), 40);
-const fOral = new THREE.Mesh(fOralGeo, femSuckerMat), fVentral = new THREE.Mesh(fVentralGeo, femSuckerMat);
-for (const s of [oral, ventral, fOral, fVentral]) { s.castShadow = s.receiveShadow = true; scene.add(s); }
+const ventral = new THREE.Mesh(ventralGeo, suckerMat);
+ventral.castShadow = ventral.receiveShadow = true; scene.add(ventral);
 
 const _m4 = new THREE.Matrix4(), _X = new THREE.Vector3(), _Y = new THREE.Vector3(), _Z = new THREE.Vector3();
 // orienta un solido di rivoluzione: asse y lungo 'axis', asse x verso 'side'
@@ -551,14 +591,8 @@ function orient(mesh, pos, axis, side, sx = 1, sy = 1, sz = 1) {
 }
 const _pos = new THREE.Vector3(), _axis = new THREE.Vector3();
 function placeMaleSuckers(t) {
-  // orale: in punta al collo, apertura rivolta in avanti e verso il lato ventrale (subterminale)
-  let f = spineAt(0.012);
-  const po = Math.sin(TAU * t / 2.3);
-  _axis.copy(f.T).multiplyScalar(-Math.cos(0.4)).addScaledVector(f.N, -Math.sin(0.4));
-  _pos.copy(f.P).addScaledVector(f.N, FORE_Y * 0.95).addScaledVector(f.T, -0.035);
-  orient(oral, _pos, _axis, f.B, 1 + 0.04 * po, 1 - 0.04 * po, 0.82 + 0.04 * po);
   // ventrale: disco sul lato ventrale del collo, aperto in basso e leggermente in avanti
-  f = spineAt(M_VS);
+  const f = spineAt(M_VS);
   const pv = Math.sin(TAU * t / 3.7 + 1);
   _axis.copy(f.N).multiplyScalar(-Math.cos(0.35)).addScaledVector(f.T, -Math.sin(0.35));
   _pos.copy(f.P).addScaledVector(f.N, 0.07);
@@ -566,10 +600,12 @@ function placeMaleSuckers(t) {
 }
 
 // ---------------------------------------------------------------- femmina: tubo con profilo di raggio
-const FR = 420, FS = 32, FK = FS + 1;
+const FR = 420, FS = 40, FK = FS + 1;
 const M_FB = M_MAX - 0.004;
 const L_F = LH + (M_FB - M_EXIT) * L_M;
-const fSig = Float32Array.from({ length: FR }, (_, i) => warp(i / (FR - 1)) * L_F);
+const F_NT = 30;            // anelli dedicati alla ventosa orale
+const fSig = Float32Array.from({ length: FR }, (_, i) => i < F_NT ? S_OS * i / F_NT
+  : S_OS + warp((i - F_NT) / (FR - 1 - F_NT)) * (L_F - S_OS));
 const femaleGeo = new THREE.BufferGeometry();
 const fPos = new Float32Array(FR * FK * 3), fCol = new Float32Array(FR * FK * 3), fBase = new Float32Array(FR * FK * 3);
 const fUV = new Float32Array(FR * FK * 2);
@@ -601,7 +637,7 @@ const femaleMesh = new THREE.Mesh(femaleGeo, femaleMat);
 femaleMesh.frustumCulled = false; femaleMesh.castShadow = femaleMesh.receiveShadow = true; scene.add(femaleMesh);
 
 function femaleRadius(sg, t, free) {
-  let r = 0.035 + 0.041 * smooth(0.07, 0.75, sg) + 0.044 * smooth(0.5, 3.8, sg);
+  let r = 0.027 + 0.05 * smooth(0.03, 0.95, sg) + 0.043 * smooth(0.5, 3.8, sg);   // parte anteriore affusolata
   r *= 1 - 0.32 * smooth(L_F - 1.3, L_F, sg);
   const a = clamp(sg / 0.035, 0, 1), b = clamp((L_F - sg) / 0.14, 0, 1);
   r *= Math.sqrt(a * (2 - a)) * Math.sqrt(b * (2 - b));
@@ -633,7 +669,13 @@ function buildFemaleHead(t) {
 
 const fc = new Float32Array(FR * 3), fN = new Float32Array(FR * 3), fCov = new Float32Array(FR), fR = new Float32Array(FR);
 const fT = new Float32Array(FR * 3);
-const I_FORAL = 0, I_FVS = fSig.findIndex(s => s >= 0.3);
+// ventosa orale della femmina: piccola coppa terminale con labbro (t: 0 giunzione → 1 fondo; z, raggio relativo, schiacciamento)
+const FOS_PROFILE = makeProfile([
+  [0.00, 0.000, 1.00, 1.00], [0.30, 0.022, 0.97, 1.00], [0.50, 0.036, 0.82, 0.98], [0.62, 0.044, 0.62, 0.96],
+  [0.72, 0.049, 0.40, 0.94], [0.80, 0.051, 0.22, 0.92], [0.86, 0.0515, 0.14, 0.9], [0.92, 0.049, 0.09, 0.9],
+  [1.00, 0.044, 0.02, 0.9]]);
+const I_FJ = F_NT;          // primo anello del corpo dopo la ventosa orale
+const S_FVS = 0.3;          // ventosa ventrale della femmina: distanza dalla punta (mm)
 function updateFemale(t) {
   buildFemaleHead(t);
   for (let i = 0; i < FR; i++) {
@@ -655,22 +697,45 @@ function updateFemale(t) {
     }
   }
   const T = new THREE.Vector3(), N = new THREE.Vector3(), B = new THREE.Vector3(), d = new THREE.Vector3(), gap = new THREE.Vector3();
+  // giunzione con la ventosa orale: asse e sistema di riferimento degli anelli della punta
+  const TJ = new THREE.Vector3(fc[I_FJ * 3 + 3] - fc[I_FJ * 3 - 3], fc[I_FJ * 3 + 4] - fc[I_FJ * 3 - 2], fc[I_FJ * 3 + 5] - fc[I_FJ * 3 - 1]).normalize();
+  const NJ = new THREE.Vector3(fN[I_FJ * 3], fN[I_FJ * 3 + 1], fN[I_FJ * 3 + 2]); NJ.addScaledVector(TJ, -NJ.dot(TJ)).normalize();
+  const CJ = new THREE.Vector3(fc[I_FJ * 3], fc[I_FJ * 3 + 1], fc[I_FJ * 3 + 2]);
+  const rJ = femaleRadius(S_OS, t, 1);
+  const fpulse = Math.sin(TAU * t / 1.9 + 0.7);
   for (let i = 0; i < FR; i++) {
-    const a = Math.max(0, i - 1), b = Math.min(FR - 1, i + 1);
-    T.set(fc[b * 3] - fc[a * 3], fc[b * 3 + 1] - fc[a * 3 + 1], fc[b * 3 + 2] - fc[a * 3 + 2]).normalize();
-    N.set(fN[i * 3], fN[i * 3 + 1], fN[i * 3 + 2]); N.addScaledVector(T, -N.dot(T)).normalize();
+    let r, ay = 1;
+    if (i < I_FJ) {
+      const tau = 1 - i / F_NT;
+      FOS_PROFILE(tau, prof);
+      fc[i * 3] = CJ.x - TJ.x * prof[0]; fc[i * 3 + 1] = CJ.y - TJ.y * prof[0]; fc[i * 3 + 2] = CJ.z - TJ.z * prof[0];
+      T.copy(TJ); N.copy(NJ);
+      const open = smooth(0.55, 0.8, tau);
+      r = rJ * prof[1] * (1 + 0.08 * fpulse * open); ay = prof[2];
+    } else {
+      const a = Math.max(I_FJ, i - 1), b = Math.min(FR - 1, i + 1);
+      T.set(fc[b * 3] - fc[a * 3], fc[b * 3 + 1] - fc[a * 3 + 1], fc[b * 3 + 2] - fc[a * 3 + 2]).normalize();
+      N.set(fN[i * 3], fN[i * 3 + 1], fN[i * 3 + 2]); N.addScaledVector(T, -N.dot(T)).normalize();
+      r = femaleRadius(fSig[i], t, 1 - fCov[i]);
+    }
     B.crossVectors(T, N);
     fT[i * 3] = T.x; fT[i * 3 + 1] = T.y; fT[i * 3 + 2] = T.z;
     fN[i * 3] = N.x; fN[i * 3 + 1] = N.y; fN[i * 3 + 2] = N.z;
     gap.copy(N).negate();                               // apertura del canale: lato ventrale del maschio
     const sg = fSig[i];
-    const r = femaleRadius(sg, t, 1 - fCov[i]);
     fR[i] = r;
     for (let j = 0; j < FK; j++) {
       const th = j / FS * TAU;
-      d.copy(N).multiplyScalar(Math.cos(th)).addScaledVector(B, Math.sin(th));
+      // ventosa ventrale: piccolo disco a fessura trasversale sul lato ventrale, a S_FVS dalla punta
+      let rr = r;
+      if (sg > S_FVS - 0.06 && sg < S_FVS + 0.06) {
+        let dth = th - Math.PI; dth -= TAU * Math.round(dth / TAU);
+        const du = sg - S_FVS, dv = dth * r, rho = Math.hypot(du, dv);
+        rr += 0.006 * Math.exp(-(((rho - 0.015) / 0.0065) ** 2)) - 0.005 * Math.exp(-((Math.hypot(du * 1.5, dv * 0.8) / 0.009) ** 2));
+      }
+      d.copy(N).multiplyScalar(Math.cos(th) * ay).addScaledVector(B, Math.sin(th));
       const p = (i * FK + j) * 3;
-      fPos[p] = fc[i * 3] + d.x * r; fPos[p + 1] = fc[i * 3 + 1] + d.y * r; fPos[p + 2] = fc[i * 3 + 2] + d.z * r;
+      fPos[p] = fc[i * 3] + d.x * rr; fPos[p + 1] = fc[i * 3 + 1] + d.y * rr; fPos[p + 2] = fc[i * 3 + 2] + d.z * rr;
       // dentro il canale arriva poca luce: in luce soprattutto la parte che guarda l'apertura
       const face = d.dot(gap);
       const ao = lerp(1, lerp(0.5, 1.0, smooth(-0.35, 0.75, face)), fCov[i]);
@@ -681,13 +746,6 @@ function updateFemale(t) {
   femaleGeo.attributes.color.needsUpdate = true;
   femaleGeo.computeVertexNormals();
   fixSeam(femaleGeo, FR, FK);
-  // ventose della femmina
-  const v3 = (A, i) => new THREE.Vector3(A[i * 3], A[i * 3 + 1], A[i * 3 + 2]);
-  let i = I_FORAL;
-  orient(fOral, v3(fc, i), v3(fT, i).negate(), v3(fN, i), 1, 1, 0.8);
-  i = I_FVS;
-  const n = v3(fN, i).negate(), side = new THREE.Vector3().crossVectors(v3(fT, i), n);
-  orient(fVentral, v3(fc, i).addScaledVector(n, fR[i] * 0.8), n, side, 1, 0.5, 0.5);
 }
 
 // ---------------------------------------------------------------- camera
@@ -703,6 +761,11 @@ function autoCamera(t) {
   const el = num('el', 0.2 + 0.06 * Math.sin(TAU * t / 33 + 1.0));
   camera.position.set(DIST * Math.sin(az) * Math.cos(el), DIST * Math.sin(el), DIST * Math.cos(az) * Math.cos(el));
   if (params.has('fm')) { const f = spineAt(num('fm', 0)); camera.position.add(f.P); camera.lookAt(f.P); }
+  else if (params.has('ff')) {
+    const i = Math.max(0, fSig.findIndex(x => x >= num('ff', 0)));
+    const c = new THREE.Vector3(fc[i * 3], fc[i * 3 + 1], fc[i * 3 + 2]);
+    camera.position.add(c); camera.lookAt(c);
+  }
   else camera.lookAt(0, 0, 0);
 }
 function syncRig() {
@@ -754,8 +817,23 @@ function renderAt(t) {
   renderer.shadowMap.needsUpdate = SHADOWS;
   composer.render();
 }
-if (params.has('nomale')) { maleMesh.visible = false; oral.visible = false; ventral.visible = false; }
+if (params.has('wire')) femaleMat.wireframe = true;
+if (params.has('nomale')) { maleMesh.visible = false; ventral.visible = false; }
 window.__renderAt = (t) => { renderAt(t); return true; };
+if (params.has('debug')) window.__tip = (t) => {
+  buildSpine(t); updateFemale(t);
+  const C = new THREE.Vector3(fc[I_FJ * 3], fc[I_FJ * 3 + 1], fc[I_FJ * 3 + 2]);
+  const T = new THREE.Vector3(fT[I_FJ * 3], fT[I_FJ * 3 + 1], fT[I_FJ * 3 + 2]);
+  const out = [];
+  for (let i = 0; i < I_FJ + 6; i++) {
+    const c = new THREE.Vector3(fc[i * 3], fc[i * 3 + 1], fc[i * 3 + 2]);
+    const rad = Array.from({ length: FK }, (_, j) => j).map(j => { const p = (i * FK + j) * 3; return +Math.hypot(fPos[p] - fc[i * 3], fPos[p + 1] - fc[i * 3 + 1], fPos[p + 2] - fc[i * 3 + 2]).toFixed(4); });
+    const ax = [0, 10, 20, 30].map(j => { const p = (i * FK + j) * 3; return +(-(new THREE.Vector3(fPos[p], fPos[p + 1], fPos[p + 2]).sub(C).dot(T))).toFixed(4); });
+    const n = new THREE.Vector3(fc[i * 3 + 3], fc[i * 3 + 4], fc[i * 3 + 5]);
+    out.push([i, rad.map(v => Math.round(v * 1e4)).join(" ")]);
+  }
+  return out;
+};
 // verifica delle compenetrazioni (solo con ?debug): distanza minima fra superfici approssimate da sfere
 if (params.has('debug')) window.__clearance = (t) => {
   buildSpine(t); updateFemale(t);
@@ -766,7 +844,7 @@ if (params.has('debug')) window.__clearance = (t) => {
     else male.push([f.P.clone(), 0.345 * (1 - 0.14 * smooth(0.86, 0.96, m)), m]);
   }
   let f = spineAt(M_VS); male.push([f.P.clone().addScaledVector(f.N, -0.08), 0.19, M_VS]);
-  f = spineAt(0.0); male.push([f.P.clone().addScaledVector(f.N, 0.18).addScaledVector(f.T, -0.06), 0.16, 0]);
+  f = spineAt(M_OS); male.push([f.P.clone().addScaledVector(f.N, FORE_Y).addScaledVector(f.T, -0.09), 0.17, 0]);
   const out = { headFem: 9, tailFem: 9, maleSelf: 9, femSelf: 9 };
   const fpt = (i) => new THREE.Vector3(fc[i * 3], fc[i * 3 + 1], fc[i * 3 + 2]);
   for (let i = 0; i < FR; i += 2) {
